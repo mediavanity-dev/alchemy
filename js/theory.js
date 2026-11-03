@@ -150,22 +150,32 @@ function makeWindows(notes, rhythm) {
   bounds.push(t1);
 
   const wins = [];
-  for (let i = 0; i < bounds.length - 1; i++) {
-    const s = bounds[i], e = bounds[i + 1];
-    const items = [];
-    for (const n of notes) {
-      const ov = Math.min(e, n.end) - Math.max(s, n.start);
-      if (ov > 0) items.push({ pc: pc(n.midi), w: ov, start: n.start });
-    }
-    // The note sounding as the chord arrives matters most.
-    if (items.length) {
-      const lead = items.reduce((a, x) => (Math.abs(x.start - s) < Math.abs(a.start - s) ? x : a));
-      lead.w *= 1.5;
-    }
-    const total = items.reduce((a, x) => a + x.w, 0);
-    wins.push({ start: s, end: e, items, total });
-  }
+  for (let i = 0; i < bounds.length - 1; i++) wins.push(windowOver(notes, bounds[i], bounds[i + 1]));
   return wins;
+}
+
+// The pitch classes sounding in [s, e], weighted by how long they sound.
+function windowOver(notes, s, e) {
+  const items = [];
+  for (const n of notes) {
+    const ov = Math.min(e, n.end) - Math.max(s, n.start);
+    if (ov > 0) items.push({ pc: pc(n.midi), w: ov, start: n.start });
+  }
+  // The note sounding as the chord arrives matters most.
+  if (items.length) {
+    const lead = items.reduce((a, x) => (Math.abs(x.start - s) < Math.abs(a.start - s) ? x : a));
+    lead.w *= 1.5;
+  }
+  const total = items.reduce((a, x) => a + x.w, 0);
+  return { start: s, end: e, items, total };
+}
+
+// Best-fitting chords for an arbitrary stretch, e.g. after the user moves a chord.
+export function rankChords(notes, key, vocab, start, end) {
+  const scale = scalePcs(key);
+  const win = windowOver(notes, start, end);
+  const ranked = vocab.map((c) => ({ chord: c, score: emission(c, win, scale) })).sort((a, b) => b.score - a.score);
+  return { ranked, pcs: [...new Set(win.items.map((it) => it.pc))] };
 }
 
 function emission(c, win, scale) {

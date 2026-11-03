@@ -1,5 +1,5 @@
 import { extractTrack, segmentNotes, livePitch, normalizeLoudness } from './pitch.js';
-import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing, detectTempo, beatsBetween } from './theory.js';
+import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing, detectTempo, beatsBetween, rankChords } from './theory.js';
 import { Synth } from './synth.js';
 import { tuneClip, targetFn } from './tune.js';
 import * as store from './db.js';
@@ -25,6 +25,8 @@ const state = {
   playing: null,
   trimming: null,
   toneOctave: null,
+  editing: null,
+  countIn: { on: false, bpm: 100 },
   metronome: false,
 };
 
@@ -60,6 +62,8 @@ function fitCanvas(cv) {
 }
 
 function roundRect(g, x, y, w, h, r) {
+  w = Math.max(0, w);
+  h = Math.max(0, h);
   r = Math.min(r, w / 2, h / 2);
   g.beginPath();
   g.moveTo(x + r, y);
@@ -145,6 +149,7 @@ function showView(name) {
   if (name !== 'harmony') {
     stopPlayback();
     state.trimming = null;
+    state.editing = null;
   }
   state.view = name;
   document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${name}`));
@@ -178,12 +183,11 @@ async function startRecording() {
     toast(e.message);
     return;
   }
-  rec = { mic, chunks: [], length: 0, sr: mic.sr, recent: new Float32Array(2048), trace: [] };
+  rec = { mic, chunks: [], length: 0, sr: mic.sr, recent: new Float32Array(2048), trace: [], startAt: -Infinity };
   starting = false;
 
   document.body.classList.add('recording');
   $('#recBtn').setAttribute('aria-label', 'Stop recording');
-  $('#capturePrompt').textContent = 'Listening…';
   $('#recTime').textContent = '0:00';
   haptic(15);
   rec.timer = setInterval(() => {
@@ -191,10 +195,55 @@ async function startRecording() {
     $('#recTime').textContent = `${fmtTime(s)} / ${fmtTime(MAX_SECONDS)}`;
     if (s >= MAX_SECONDS) stopRecording();
   }, 200);
+
+  if (state.countIn.on) startCountIn();
+  else $('#capturePrompt').textContent = 'Listening…';
 }
 
-function onChunk(chunk) {
+// Four clicks, shown as 4-3-2-1; the take starts on the beat after "1". Everything
+// the mic hears before then (including the clicks) is discarded.
+function startCountIn() {
+  const ctx = synth.ctx;
+  const beat = 60 / state.countIn.bpm;
+  const t0 = ctx.currentTime + 0.3;
+  synth.countIn(t0, beat, 4);
+  // Align the take with when the singer actually hears the beat, plus the mic's own delay.
+  const outLatency = ctx.outputLatency || ctx.baseLatency || 0;
+  Object.assign(rec, { counting: true, countT0: t0, beat, bpm: state.countIn.bpm, startAt: t0 + 4 * beat + outLatency + rec.mic.latency });
+  $('#capturePrompt').textContent = 'Get ready…';
+  const noteEl = $('#liveNote');
+  noteEl.classList.add('count');
+  noteEl.classList.remove('idle');
+  noteEl.textContent = '';
+  const r = rec;
+  const step = () => {
+    if (rec !== r || !r.counting) return;
+    const k = Math.floor((ctx.currentTime - r.countT0) / r.beat);
+    if (k >= 4) {
+      r.counting = false;
+      noteEl.classList.remove('count');
+      resetLive();
+      $('#capturePrompt').textContent = 'Listening…';
+      haptic(15);
+      return;
+    }
+    if (k >= 0 && noteEl.textContent !== String(4 - k)) {
+      noteEl.textContent = 4 - k;
+      haptic(8);
+    }
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+function onChunk(chunk, time) {
   if (!rec) return;
+  // Drop audio from before the take starts (the count-in).
+  if (time != null && time < rec.startAt) {
+    const skip = Math.round((rec.startAt - time) * rec.sr);
+    if (skip >= chunk.length) return;
+    chunk = chunk.subarray(skip);
+  }
   rec.chunks.push(chunk);
   rec.length += chunk.length;
   const r = rec.recent;
@@ -284,20 +333,102 @@ async function stopRecording() {
   rec = null;
   clearInterval(r.timer);
   r.mic.close();
+  synth.stopCountIn();
   lastTrace = r.trace;
 
   document.body.classList.remove('recording');
   $('#recBtn').setAttribute('aria-label', 'Start recording');
   $('#capturePrompt').textContent = 'Hum or sing a melody';
   $('#recTime').textContent = 'Tap to record';
+  $('#liveNote').classList.remove('count');
   resetLive();
   haptic(10);
 
+  if (r.counting) return; // cancelled during the count-in
   if (r.length < r.sr * 0.8) {
     toast('That was a bit short. Hum a phrase of a few notes.');
     return;
   }
-  await processAudio(concat(r.chunks, r.length), r.sr, defaultName());
+  // With a count-in, the beat grid is known exactly: the take starts on a downbeat.
+  const tempo = r.bpm ? { bpm: r.bpm, beat: 60 / r.bpm, downbeat: 0, steady: true, manual: true } : null;
+  await processAudio(concat(r.chunks, r.length), r.sr, defaultName(), tempo);
+}
+
+/* ---------- count-in ---------- */
+
+function loadCountIn() {
+  try { return { on: false, bpm: 100, ...JSON.parse(localStorage.getItem('alchemy.countIn') ?? '{}') }; } catch { return { on: false, bpm: 100 }; }
+}
+
+function saveCountIn() {
+  try { localStorage.setItem('alchemy.countIn', JSON.stringify(state.countIn)); } catch { /* storage unavailable */ }
+  renderCountIn();
+}
+
+function renderCountIn() {
+  const { on, bpm } = state.countIn;
+  $('#countBtn').setAttribute('aria-pressed', String(on));
+  $('#countText').textContent = on ? `Count-in · ${bpm} bpm` : 'Count-in off';
+}
+
+$('#countBtn').addEventListener('click', openCountInSheet);
+
+function openCountInSheet() {
+  const { on, bpm } = state.countIn;
+  openSheet(`<div class="count-sheet">
+    <h3>Count-in</h3>
+    <p class="sub">Four clicks (4, 3, 2, 1) before recording starts, so you come in on time. The clicks stop on the 1 and aren't recorded.</p>
+    <div class="seg" role="group" aria-label="Count-in">
+      <button data-on="0" class="${on ? '' : 'active'}">Off</button>
+      <button data-on="1" class="${on ? 'active' : ''}">On</button>
+    </div>
+    <div class="tempo-row" style="margin-top:18px">
+      <button class="icon-btn" data-step="-1" aria-label="Slower">−</button>
+      <div class="tempo-value">${bpm}<small>BPM</small></div>
+      <button class="icon-btn" data-step="1" aria-label="Faster">+</button>
+    </div>
+    <div class="tempo-tools" style="grid-template-columns:1fr 1fr">
+      <button class="btn" id="countTap">Tap tempo</button>
+      <button class="btn" id="countPreview">Preview</button>
+    </div>
+  </div>`);
+
+  const body = $('#sheetBody .count-sheet');
+  const setBpm = (v) => {
+    state.countIn = { on: true, bpm: Math.max(40, Math.min(240, Math.round(v))) };
+    saveCountIn();
+    openCountInSheet();
+  };
+  body.addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.on) {
+      state.countIn = { ...state.countIn, on: b.dataset.on === '1' };
+      saveCountIn();
+      openCountInSheet();
+    } else if (b.dataset.step) setBpm(state.countIn.bpm + +b.dataset.step);
+    else if (b.id === 'countPreview') {
+      const ctx = synth.ensure();
+      synth.countIn(ctx.currentTime + 0.05, 60 / state.countIn.bpm, 4);
+    } else return;
+    haptic();
+  });
+  const taps = [];
+  $('#countTap').addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    const now = performance.now();
+    if (taps.length && now - taps[taps.length - 1] > 2000) taps.length = 0;
+    taps.push(now);
+    haptic(5);
+    if (taps.length >= 4) {
+      const bpm = Math.round(60000 / ((taps[taps.length - 1] - taps[0]) / (taps.length - 1)));
+      body.querySelector('.tempo-value').firstChild.textContent = bpm;
+      clearTimeout(openCountInSheet.tapTimer);
+      openCountInSheet.tapTimer = setTimeout(() => { if (body.isConnected) setBpm(bpm); }, 1200);
+    } else {
+      e.currentTarget.textContent = `Tap ${4 - taps.length} more`;
+    }
+  });
 }
 
 function defaultName() {
@@ -355,7 +486,7 @@ $('#demoBtn').addEventListener('click', () => {
 
 /* ---------- analysis ---------- */
 
-async function processAudio(samples, sampleRate, name) {
+async function processAudio(samples, sampleRate, name, tempo = null) {
   setProcessing(true, 0.05);
   await nextFrame();
   normalizeLoudness(samples, sampleRate);
@@ -384,6 +515,7 @@ async function processAudio(samples, sampleRate, name) {
     track,
     trim: { start: 0, end: duration },
     layers: [],
+    tempo,
   });
   haptic([8, 40, 8]);
   showView('harmony');
@@ -392,6 +524,7 @@ async function processAudio(samples, sampleRate, name) {
 function loadTake(take, saved = {}) {
   stopPlayback();
   state.trimming = null;
+  state.editing = null;
   take.layers ??= [];
   take.trim ??= { start: 0, end: take.duration };
   take.tune ??= { amount: 0, mode: 'chromatic' };
@@ -403,7 +536,22 @@ function loadTake(take, saved = {}) {
   state.palette = saved.palette ?? state.palette;
   reharmonize();
   state.overrides = saved.overrides ?? {};
+  // Chord timing the user edited by hand
+  if (saved.segments?.length) {
+    const { vocab } = state.harmony;
+    state.harmony.segments = saved.segments.map((s) => ({ start: s.start, end: s.end, chord: vocab[s.chordId] ?? vocab[0], edited: s.edited }));
+    state.harmony.segments.forEach(refitSegment);
+    state.overrides = {};
+  }
   take.dirty = false;
+}
+
+// Refreshes a chord's suggestions (and the notes under it) after its timing or notes changed.
+function refitSegment(seg) {
+  const { ranked, pcs } = rankChords(analysisNotes(), state.keys[state.keyIdx], state.harmony.vocab, seg.start, seg.end);
+  seg.alts = ranked.slice(0, 6);
+  if (!seg.alts.some((a) => a.chord === seg.chord)) seg.alts[seg.alts.length - 1] = ranked.find((a) => a.chord === seg.chord);
+  seg.pcs = pcs;
 }
 
 // The notes the harmony is built from: the (trimmed) take plus any layers the user opted in.
@@ -473,11 +621,16 @@ function renderHarmony() {
   const key = state.keys[state.keyIdx];
   const segs = resolvedSegments();
   const trimming = !!state.trimming;
+  const editing = !!state.editing;
 
   $('#harmonyContent').classList.toggle('trimming', trimming);
+  $('#harmonyContent').classList.toggle('editing', editing);
   $('#rollCanvas').classList.toggle('trim', trimming);
-  $('#rollBar').hidden = trimming;
+  $('#rollCanvas').classList.toggle('editing', editing);
+  $('#rollBar').hidden = trimming || editing;
   $('#trimBar').hidden = !trimming;
+  $('#editBar').hidden = !editing;
+  $('#editReset').hidden = !hasEdits();
 
   $('#takeName').textContent = take.name;
   $('#keyTitle').textContent = keyName(key);
@@ -511,14 +664,14 @@ function renderHarmony() {
   });
 
   $('#chordList').innerHTML = segs
-    .map((s, i) => `<button class="chord-card ${state.overrides[i] != null ? 'edited' : ''}" data-i="${i}"><span class="sym">${s.chord.symbol}</span><span class="rn">${s.chord.roman}</span></button>`)
+    .map((s, i) => `<button class="chord-card ${s.edited || state.overrides[i] != null ? 'edited' : ''}" data-i="${i}"><span class="sym">${s.chord.symbol}</span><span class="rn">${s.chord.roman}</span></button>`)
     .join('');
 
   const scale = scalePcs(key);
   $('#melodyLine').innerHTML = take.notes
     .map((n) => {
       const p = pc(n.midi);
-      const cls = p === key.tonic ? 'tonic' : scale.has(p) ? '' : 'out';
+      const cls = (p === key.tonic ? 'tonic' : scale.has(p) ? '' : 'out') + (n.edited ? ' edited' : '');
       return `<span class="${cls}">${spell(p, key)}</span>`;
     })
     .join('');
@@ -535,7 +688,7 @@ function renderHarmony() {
 
 function updateTransportStatus(text) {
   const el = $('#transportStatus');
-  const msg = text ?? (state.trimming ? 'Play previews your selection' : '');
+  const msg = text ?? (state.trimming ? 'Play previews your selection' : state.editing ? 'Tap the chord bar to split a chord' : '');
   el.hidden = !msg;
   $('#transportStatusText').textContent = msg;
   document.querySelector('.mode-seg').hidden = !!msg;
@@ -550,6 +703,8 @@ function drawRoll(playT = null) {
   const take = state.take;
   const key = state.keys[state.keyIdx];
   const trimming = state.trimming;
+  const editing = state.editing;
+  const drag = editing?.drag;
   const play = state.playing;
   const { start, end } = trimming
     ? { start: 0, end: take.duration }
@@ -565,14 +720,17 @@ function drawRoll(playT = null) {
   if (!Number.isFinite(lo)) { lo = 55; hi = 67; }
   lo -= 2; hi += 2;
   while (hi - lo < 12) { lo--; if (hi - lo < 12) hi++; }
+  // Hold the pitch range still while a note is being dragged.
+  if (drag?.range) ({ lo, hi } = drag.range);
 
-  const left = 30, right = 8, top = 8, band = trimming ? 18 : 34;
+  const left = 30, right = 8, top = 8, band = trimming ? 18 : editing ? 40 : 34;
   const rollH = h - top - band - 10;
   const laneH = rollH / (hi - lo + 1);
   const x = (t) => left + ((t - start) / (end - start)) * (w - left - right);
   const laneY = (m) => top + (hi - m) * laneH;
   const scale = scalePcs(key);
-  rollGeom = { x0: left, x1: w - right, start, end };
+  const by = h - band - 4;
+  rollGeom = { x0: left, x1: w - right, start, end, top, laneH, lo, hi, by, x, laneY };
 
   const cLane = token('--lane'), cTonic = token('--lane-tonic'), cFaint = token('--faint');
   const cGold = token('--gold'), cViolet = token('--violet'), cSurface = token('--surface'), cSurface2 = token('--surface-2');
@@ -645,6 +803,19 @@ function drawRoll(playT = null) {
       g.globalAlpha = playT == null || active ? 1 : 0.55;
       g.fill();
       g.globalAlpha = 1;
+      // Notes the user moved get a ring
+      if (n.edited || drag?.note === n) {
+        g.strokeStyle = cText;
+        g.lineWidth = 1.5;
+        g.stroke();
+      }
+      if (drag?.note === n) {
+        g.font = '600 11px ' + token('--font');
+        g.fillStyle = cText;
+        g.textBaseline = 'bottom';
+        g.fillText(noteLabel(n.midi, key), nx, laneY(n.midi) - 3);
+        g.textBaseline = 'middle';
+      }
     }
   }
   g.restore();
@@ -670,7 +841,6 @@ function drawRoll(playT = null) {
     g.fillText(fmtPrecise(trimming.end), Math.max(b - 4, left + 90), h - band / 2 - 2);
     g.textAlign = 'left';
   } else {
-    const by = h - band - 4;
     g.font = '600 12px ' + token('--font');
     g.textAlign = 'center';
     for (const s of segs) {
@@ -684,6 +854,19 @@ function drawRoll(playT = null) {
       g.fillText(label, sx + sw / 2, by + band / 2);
     }
     g.textAlign = 'left';
+
+    if (editing) {
+      // Snap points (note starts, and beats when the metronome is on) above the chord bar
+      g.fillStyle = cFaint;
+      for (const f of focalPoints()) g.fillRect(Math.round(x(f)) - 1, by - 5, 2, 3);
+      // Draggable edges between chords
+      segs.slice(1).forEach((s, k) => {
+        const active = drag?.type === 'edge' && drag.i === k + 1;
+        g.fillStyle = active ? cText : cGold;
+        roundRect(g, x(s.start) - 2.5, by + 6, 5, band - 12, 2.5);
+        g.fill();
+      });
+    }
   }
 
   if (playT != null) {
@@ -778,6 +961,7 @@ function trimTimeAt(clientX) {
 
 const roll = $('#rollCanvas');
 roll.addEventListener('pointerdown', (e) => {
+  if (state.editing && rollGeom) return editPointerDown(e);
   const tr = state.trimming;
   if (!tr || !rollGeom) return;
   const t = trimTimeAt(e.clientX);
@@ -786,9 +970,18 @@ roll.addEventListener('pointerdown', (e) => {
   moveTrimHandle(t);
 });
 roll.addEventListener('pointermove', (e) => {
-  if (state.trimming?.drag) moveTrimHandle(trimTimeAt(e.clientX));
+  if (state.editing?.drag) editPointerMove(e);
+  else if (state.trimming?.drag) moveTrimHandle(trimTimeAt(e.clientX));
 });
-['pointerup', 'pointercancel'].forEach((ev) => roll.addEventListener(ev, () => { if (state.trimming) state.trimming.drag = null; }));
+roll.addEventListener('pointerup', () => {
+  if (state.editing) editPointerUp();
+  if (state.trimming) state.trimming.drag = null;
+});
+roll.addEventListener('pointercancel', () => {
+  if (state.editing?.drag?.type === 'note') state.editing.drag.note.midi = state.editing.drag.from;
+  if (state.editing) { state.editing.drag = null; drawRoll(); }
+  if (state.trimming) state.trimming.drag = null;
+});
 
 function moveTrimHandle(t) {
   const tr = state.trimming;
@@ -797,6 +990,184 @@ function moveTrimHandle(t) {
   tr.start = Math.max(0, tr.start);
   tr.end = Math.min(state.take.duration, tr.end);
   drawRoll();
+}
+
+/* ---------- edit mode: chord timing and note pitches ---------- */
+
+$('#editBtn').addEventListener('click', () => {
+  stopPlayback();
+  // Fold any chord picks into the segments so they can be moved around freely.
+  state.harmony.segments = resolvedSegments().map((s, i) => ({ ...s, edited: s.edited || state.overrides[i] != null }));
+  state.overrides = {};
+  state.editing = { drag: null };
+  renderHarmony();
+  haptic();
+});
+
+$('#editDone').addEventListener('click', () => {
+  state.editing = null;
+  renderHarmony();
+});
+
+$('#editReset').addEventListener('click', () => {
+  const take = state.take;
+  for (const n of [...take.notes, ...take.layers.flatMap((l) => l.notes)]) {
+    if (n.origMidi != null) n.midi = n.origMidi;
+    delete n.origMidi;
+    delete n.edited;
+  }
+  take.noteRev = (take.noteRev ?? 0) + 1;
+  stopPlayback();
+  reharmonize();
+  renderHarmony();
+  toast('Edits reset');
+});
+
+function hasEdits() {
+  const take = state.take;
+  return state.harmony.segments.some((s) => s.edited) ||
+    [...take.notes, ...take.layers.flatMap((l) => l.notes)].some((n) => n.edited);
+}
+
+// Where chord changes can snap: note starts, plus beats when the metronome is on.
+function focalPoints() {
+  const { start, end } = takeRange();
+  const pts = analysisNotes().map((n) => n.start);
+  if (state.metronome && state.take.tempo) pts.push(...beatsBetween(state.take.tempo, start, end).map((b) => b.t));
+  return [...new Set(pts.filter((t) => t > start && t < end).map((t) => Math.round(t * 1000) / 1000))].sort((a, b) => a - b);
+}
+
+const nearest = (pts, t) => pts.reduce((a, p) => (Math.abs(p - t) < Math.abs(a - t) ? p : a));
+
+function rollPoint(e) {
+  const r = roll.getBoundingClientRect();
+  const G = rollGeom;
+  const px = e.clientX - r.left, py = e.clientY - r.top;
+  return { px, py, t: G.start + ((px - G.x0) / (G.x1 - G.x0)) * (G.end - G.start) };
+}
+
+// Editable notes: the take's, plus layers that feed the harmony.
+function noteAt(px, py) {
+  const take = state.take;
+  const G = rollGeom;
+  const notes = [...take.notes, ...take.layers.filter((l) => l.included).flatMap((l) => l.notes)];
+  let best = null, bestD = Infinity;
+  for (const n of notes) {
+    const x0 = G.x(n.start) - 4, x1 = G.x(n.end) + 4;
+    if (px < x0 || px > x1) continue;
+    const d = Math.abs(py - (G.laneY(n.midi) + G.laneH / 2));
+    if (d <= Math.max(G.laneH / 2 + 4, 14) && d < bestD) { best = n; bestD = d; }
+  }
+  return best;
+}
+
+function editPointerDown(e) {
+  const { px, py, t } = rollPoint(e);
+  const G = rollGeom;
+  const segs = state.harmony.segments;
+  if (py >= G.by - 8) {
+    let edge = -1, ed = 18;
+    segs.forEach((s, i) => {
+      const d = Math.abs(G.x(s.start) - px);
+      if (i > 0 && d < ed) { ed = d; edge = i; }
+    });
+    state.editing.drag = edge > 0 ? { type: 'edge', i: edge } : { type: 'tap', t };
+    if (edge > 0) { roll.setPointerCapture(e.pointerId); haptic(5); }
+    drawRoll();
+    return;
+  }
+  const note = noteAt(px, py);
+  if (!note) return;
+  state.editing.drag = { type: 'note', note, from: note.midi, range: { lo: G.lo, hi: G.hi } };
+  roll.setPointerCapture(e.pointerId);
+  haptic(5);
+  drawRoll();
+}
+
+function editPointerMove(e) {
+  const d = state.editing.drag;
+  const { py, t } = rollPoint(e);
+  const G = rollGeom;
+  if (d.type === 'edge') {
+    const segs = state.harmony.segments;
+    const lo = segs[d.i - 1].start, hi = segs[d.i].end;
+    const snapped = nearest([lo, hi, ...focalPoints().filter((p) => p > lo && p < hi)], t);
+    if (snapped !== segs[d.i].start) haptic(3);
+    segs[d.i - 1].end = segs[d.i].start = snapped;
+    drawRoll();
+  } else if (d.type === 'note') {
+    const m = Math.round(G.hi - (py - G.top - G.laneH / 2) / G.laneH);
+    const clamped = Math.max(d.range.lo, Math.min(d.range.hi, m));
+    if (clamped !== d.note.midi) { d.note.midi = clamped; haptic(3); drawRoll(); }
+  }
+}
+
+function editPointerUp() {
+  const d = state.editing.drag;
+  if (!d) return;
+  state.editing.drag = null;
+  const take = state.take;
+  if (d.type === 'edge') {
+    // An edge dragged onto its neighbour merges the two chords.
+    const segs = state.harmony.segments;
+    segs[d.i - 1].edited = segs[d.i].edited = true;
+    const kept = segs.filter((s) => s.end - s.start > 0.08);
+    kept.forEach((s, k) => { if (k) s.start = kept[k - 1].end; });
+    kept.forEach(refitSegment);
+    if (kept.length < segs.length) toast('Chords merged');
+    state.harmony.segments = kept;
+  } else if (d.type === 'tap') {
+    splitAt(d.t);
+    return;
+  } else if (d.type === 'note') {
+    if (d.note.midi === d.from) { drawRoll(); return; }
+    d.note.origMidi ??= d.from;
+    d.note.edited = d.note.midi !== d.note.origMidi;
+    if (!d.note.edited) delete d.note.origMidi;
+    take.noteRev = (take.noteRev ?? 0) + 1;
+    afterNoteEdit();
+  }
+  markDirty();
+  renderHarmony();
+}
+
+function splitAt(t) {
+  const segs = state.harmony.segments;
+  const i = segs.findIndex((s) => t >= s.start && t < s.end);
+  if (i < 0) return drawRoll();
+  const seg = segs[i];
+  const pts = focalPoints().filter((p) => p > seg.start + 0.12 && p < seg.end - 0.12);
+  if (!pts.length) {
+    toast('No note starts inside that chord to split at.');
+    return drawRoll();
+  }
+  const at = nearest(pts, t);
+  const right = { start: at, end: seg.end, edited: true };
+  right.chord = rankChords(analysisNotes(), state.keys[state.keyIdx], state.harmony.vocab, at, seg.end).ranked[0].chord;
+  seg.end = at;
+  seg.edited = true;
+  segs.splice(i + 1, 0, right);
+  refitSegment(seg);
+  refitSegment(right);
+  markDirty();
+  renderHarmony();
+  haptic(10);
+  if (!splitAt.hinted) {
+    splitAt.hinted = true;
+    toast('Split. Drag an edge onto its neighbour to merge.');
+  }
+}
+
+// After a pitch fix: re-fit the chords, unless the user has already shaped them by hand.
+function afterNoteEdit() {
+  const shaped = state.harmony.segments.some((s) => s.edited);
+  if (shaped) {
+    state.harmony.segments.forEach(refitSegment);
+    toast('Note changed. Your chords are kept; tap one to see fresh suggestions.');
+  } else {
+    reharmonize();
+    toast(state.take.tune.amount ? 'Note changed and chords re-fitted.' : 'Note changed and chords re-fitted. Turn on Tune to hear your voice at the new pitch.', 4200);
+  }
 }
 
 /* ---------- playback ---------- */
@@ -1056,7 +1427,7 @@ function voiceClip(clip) {
 
   const key = state.keys[state.keyIdx];
   const notes = isBase ? take.notes : clip.notes.map((n) => ({ ...n, start: n.start - clip.offset, end: n.end - clip.offset }));
-  const sig = [amount, mode, mode === 'key' ? `${key.tonic}${key.mode}` : '', notes.length, notes[0]?.start, notes[notes.length - 1]?.end].join('|');
+  const sig = [amount, mode, mode === 'key' ? `${key.tonic}${key.mode}` : '', take.noteRev ?? 0, notes.length, notes[0]?.start, notes[notes.length - 1]?.end].join('|');
   if (clip.tuned?.sig !== sig) {
     const samples = tuneClip(
       { samples: clip.samples, sampleRate: clip.sampleRate, trace: clip.trace, traceT0: clip.traceT0, hop: clip.hop, tuning: tuning / 100, notes },
@@ -1355,6 +1726,10 @@ async function saveTake(name) {
     rhythm: state.rhythm,
     palette: state.palette,
     overrides: state.overrides,
+    segments: state.harmony.segments.some((s) => s.edited)
+      ? resolvedSegments().map((s) => ({ start: s.start, end: s.end, chordId: s.chord.id, edited: !!s.edited }))
+      : null,
+    noteRev: take.noteRev,
     summary: { key: keyName(key), chords: resolvedSegments().map((s) => s.chord.symbol), length: range.end - range.start },
   };
   const audio = { base: take.samples, layers: Object.fromEntries(take.layers.map((l) => [l.id, l.samples])) };
@@ -1466,6 +1841,8 @@ document.addEventListener('visibilitychange', () => {
 });
 
 setAudioSession('playback');
+state.countIn = loadCountIn();
+renderCountIn();
 resetLive();
 drawLive();
 if (location.hash === '#demo') $('#demoBtn').click();

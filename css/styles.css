@@ -216,6 +216,23 @@ main { flex: 1; position: relative; overflow: hidden; }
 }
 
 .rec-area { margin-top: auto; display: flex; flex-direction: column; align-items: center; gap: 10px; padding-bottom: 4px; }
+.count-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 14px 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  transition: color 0.15s, border-color 0.15s;
+}
+.count-pill svg { width: 15px; height: 15px; }
+.count-pill[aria-pressed="true"] { color: var(--gold); border-color: var(--gold); }
+.recording .count-pill { visibility: hidden; }
+.live-note.count { color: var(--gold); font-family: var(--serif); font-weight: 500; }
 .rec-wrap { position: relative; width: 116px; height: 116px; display: grid; place-items: center; }
 .rec-ring {
   position: absolute;
@@ -285,6 +302,12 @@ main { flex: 1; position: relative; overflow: hidden; }
 }
 
 .roll.trim { touch-action: none; cursor: ew-resize; }
+.roll.editing { touch-action: none; border-color: var(--gold); }
+.harmony.editing > .chips, .harmony.editing > .controls, .harmony.editing > .melody { opacity: 0.3; pointer-events: none; }
+.harmony.editing .mode-seg { display: none; }
+.editing .rec-dot { display: none; }
+/* Narrow phones: the recording length is already shown under the key, so make room. */
+@media (max-width: 420px) { #rollInfo { display: none; } }
 
 .roll-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin: 4px -6px 0 2px; }
 .roll-info { font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -386,6 +409,7 @@ main { flex: 1; position: relative; overflow: hidden; }
 }
 .melody span.out { color: var(--rose); }
 .melody span.tonic { color: var(--gold); font-weight: 600; }
+.melody span.edited { border-color: var(--text); }
 
 .transport {
   position: sticky;

@@ -19,7 +19,8 @@ function shiftCurve(clip, amount, targetOf) {
     let sum = 0, count = 0;
     for (let i = a; i <= b; i++) if (!Number.isNaN(pitch[i])) { sum += pitch[i]; count++; }
     if (!count) continue;
-    const target = targetOf(sum / count);
+    // A note the user re-pitched by hand is sung at that pitch.
+    const target = n.edited ? n.midi : targetOf(sum / count);
     for (let i = a; i <= b; i++) if (!Number.isNaN(pitch[i])) shift[i] = amount * (target - pitch[i]);
   }
 

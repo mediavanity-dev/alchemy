@@ -125,11 +125,29 @@ export class Synth {
     this._track(osc);
   }
 
+  // Count-in clicks before a recording. They bypass the reverb so no tail can
+  // ring on into the take, and can be cancelled on their own.
+  countIn(t0, beat, beats = 4) {
+    const ctx = this.ensure();
+    this.stopCountIn();
+    this.countOut = ctx.createGain();
+    this.countOut.connect(this.master);
+    for (let k = 0; k < beats; k++) this.click(t0 + k * beat, k === 0, this.countOut);
+  }
+
+  stopCountIn() {
+    const out = this.countOut;
+    if (!out) return;
+    this.countOut = null;
+    out.gain.setTargetAtTime(0, this.ctx.currentTime, 0.01);
+    setTimeout(() => out.disconnect(), 200);
+  }
+
   // Short woodblock-ish tick; the first beat of each bar is brighter.
-  click(t, accent = false) {
+  click(t, accent = false, dest = this.out) {
     const ctx = this.ctx;
     const env = ctx.createGain();
-    env.connect(this.out);
+    env.connect(dest);
     env.gain.setValueAtTime(accent ? 0.7 : 0.45, t);
     env.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
     const osc = ctx.createOscillator();
