@@ -96,20 +96,31 @@ function setProcessing(on, progress = 0) {
 
 let workletReady = false;
 
-// Opens the mic and streams raw blocks to onChunk(data, audioClockTime).
+// Opens the mic and streams raw blocks to onChunk(data, audioClockTime). Resolves
+// once audio is actually flowing, so anything scheduled next is heard.
 async function openMic(onChunk) {
   if (!navigator.mediaDevices?.getUserMedia) throw new Error('Recording needs a secure (https) connection.');
-  const ctx = synth.ensure();
+  synth.ensure(); // inside the tap, so the browser lets audio start
   setAudioSession('play-and-record');
   let stream;
   try {
+    // No voice processing at all: any of it (auto gain especially) puts phones into
+    // "call" audio, which turns everything the app plays down to call volume.
+    // Levels are evened out after recording instead.
     stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true },
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
     });
   } catch {
     setAudioSession('playback');
     throw new Error('Alchemy needs microphone access to hear you.');
   }
+  // The phone has now switched audio route; build the audio graph on a context made for it.
+  const before = synth.ctx;
+  const ctx = await synth.renew();
+  if (ctx !== before) workletReady = false;
+  let live;
+  const flowing = new Promise((r) => (live = r));
+  const deliver = (data, time) => { live(); onChunk(data, time); };
   const source = ctx.createMediaStreamSource(stream);
   const sink = ctx.createGain();
   sink.gain.value = 0;
@@ -120,14 +131,18 @@ async function openMic(onChunk) {
       workletReady = true;
     }
     node = new AudioWorkletNode(ctx, 'recorder');
-    node.port.onmessage = (e) => onChunk(e.data.data, e.data.time);
+    node.port.onmessage = (e) => deliver(e.data.data, e.data.time);
   } else {
     node = ctx.createScriptProcessor(1024, 1, 1);
-    node.onaudioprocess = (e) => onChunk(e.inputBuffer.getChannelData(0).slice(), e.playbackTime - 1024 / ctx.sampleRate);
+    node.onaudioprocess = (e) => deliver(e.inputBuffer.getChannelData(0).slice(), e.playbackTime - 1024 / ctx.sampleRate);
   }
   source.connect(node);
   node.connect(sink).connect(ctx.destination);
   const settings = stream.getAudioTracks()[0]?.getSettings?.() ?? {};
+  // Wait for the first mic audio, then a moment more for the output route to settle
+  // (Bluetooth headsets in particular take a while to switch).
+  await Promise.race([flowing, new Promise((r) => setTimeout(r, 2000))]);
+  await new Promise((r) => setTimeout(r, 250));
   return {
     sr: ctx.sampleRate,
     latency: typeof settings.latency === 'number' ? settings.latency : 0.01,
@@ -139,6 +154,8 @@ async function openMic(onChunk) {
       sink.disconnect();
       stream.getTracks().forEach((t) => t.stop());
       setAudioSession('playback');
+      // Back on the normal route: the next sound gets a fresh context at full volume.
+      synth.retire();
     },
   };
 }
@@ -175,11 +192,13 @@ async function startRecording() {
   starting = true;
   stopPlayback();
   synth.stopTone();
+  $('#capturePrompt').textContent = 'Get ready…';
   let mic;
   try {
     mic = await openMic(onChunk);
   } catch (e) {
     starting = false;
+    $('#capturePrompt').textContent = 'Hum or sing a melody';
     toast(e.message);
     return;
   }
@@ -1252,8 +1271,10 @@ function afterNoteEdit() {
 /* ---------- playback ---------- */
 
 function bufferFor(clip) {
-  if (!clip.buffer) {
-    clip.buffer = synth.ensure().createBuffer(1, clip.samples.length, clip.sampleRate);
+  // Rebuilt when the audio context has been replaced.
+  if (!clip.buffer || clip.bufferCtx !== synth.ensure()) {
+    clip.bufferCtx = synth.ctx;
+    clip.buffer = synth.ctx.createBuffer(1, clip.samples.length, clip.sampleRate);
     clip.buffer.getChannelData(0).set(clip.samples);
   }
   return clip.buffer;
@@ -1842,7 +1863,7 @@ async function saveTake(name) {
     tempo: take.tempo,
     tune: take.tune,
     traceOffset: take.traceOffset,
-    layers: take.layers.map(({ samples, buffer, tuned, ...rest }) => rest),
+    layers: take.layers.map(({ samples, buffer, bufferCtx, tuned, ...rest }) => rest),
     keyIdx: state.keyIdx,
     rhythm: state.rhythm,
     palette: state.palette,

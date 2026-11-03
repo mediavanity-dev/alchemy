@@ -120,7 +120,7 @@ export function mpm(frame, rate) {
 // Quick estimate for the live meter while recording.
 export function livePitch(frame, sr) {
   const rms = rmsOf(frame);
-  if (rms < 0.006) return { rms, midi: null };
+  if (rms < 0.003) return { rms, midi: null };
   const { data, rate } = decimate(frame, sr);
   const p = mpm(data, rate);
   return { rms, midi: p && p.clarity > 0.85 ? freqToMidi(p.freq) : null };

@@ -12,6 +12,11 @@ function makeImpulse(ctx, seconds = 2.2) {
   return buf;
 }
 
+function newContext() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  return new AC({ latencyHint: 'interactive' });
+}
+
 export class Synth {
   constructor() {
     this.ctx = null;
@@ -20,12 +25,47 @@ export class Synth {
   }
 
   ensure() {
-    if (!this.ctx) {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      this.attach(new AC({ latencyHint: 'interactive' }));
-    }
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    // Built for an audio route that's gone (see retire): start over on a fresh one.
+    if (this.ctx && this.stale) this._drop();
+    if (!this.ctx) this.attach(newContext());
+    this.stale = false;
+    // 'interrupted' is Safari's state after a phone call or audio route change.
+    if (this.ctx.state !== 'running') this.ctx.resume().catch(() => {});
     return this.ctx;
+  }
+
+  // Opening or closing the mic switches a phone's audio route (call mode, Bluetooth
+  // headset profiles, sample rate). A context that lives through the switch can stay
+  // quiet or distorted, so the next ensure() builds a new one. Until then the old
+  // context keeps working, so anything still fading out finishes cleanly.
+  retire() {
+    if (this.ctx) this.stale = true;
+  }
+
+  // Swaps in a fresh context right away, e.g. once the mic is open. Outside a tap a
+  // browser may refuse to start new audio, so the old context is only replaced once
+  // the new one is confirmed running.
+  async renew() {
+    const fresh = newContext();
+    if (fresh.state !== 'running') {
+      await Promise.race([fresh.resume().catch(() => {}), new Promise((r) => setTimeout(r, 500))]);
+    }
+    if (fresh.state !== 'running') {
+      fresh.close().catch(() => {});
+      this.stale = false;
+      return this.ensure();
+    }
+    if (this.ctx) this._drop();
+    this.attach(fresh);
+    this.stale = false;
+    return fresh;
+  }
+
+  _drop() {
+    const old = this.ctx;
+    this.ctx = this.out = this.countOut = this.toneNodes = this.clickNoise = null;
+    this.sources.clear();
+    old.close?.().catch(() => {});
   }
 
   // Builds the output chain on a context (a live one, or an offline one for measuring levels).
@@ -143,21 +183,43 @@ export class Synth {
     setTimeout(() => out.disconnect(), 200);
   }
 
-  // Short woodblock-ish tick; the first beat of each bar is brighter.
+  // Woodblock-ish tick: a pitched body plus a short noise snap for a crisp attack
+  // that cuts through on a phone speaker. The first beat of each bar is brighter.
   click(t, accent = false, dest = this.out) {
     const ctx = this.ctx;
     const env = ctx.createGain();
     env.connect(dest);
-    env.gain.setValueAtTime(accent ? 0.7 : 0.45, t);
-    env.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
+    env.gain.setValueAtTime(accent ? 0.95 : 0.7, t);
+    env.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
     const osc = ctx.createOscillator();
-    osc.type = 'sine';
+    osc.type = 'triangle';
     osc.frequency.setValueAtTime(accent ? 1900 : 1300, t);
-    osc.frequency.exponentialRampToValueAtTime(accent ? 1400 : 950, t + 0.05);
+    osc.frequency.exponentialRampToValueAtTime(accent ? 1400 : 950, t + 0.09);
     osc.connect(env);
     osc.start(t);
-    osc.stop(t + 0.06);
+    osc.stop(t + 0.1);
     this._track(osc);
+
+    this.clickNoise ??= this._noise(0.02);
+    const snap = ctx.createBufferSource();
+    snap.buffer = this.clickNoise;
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 2500;
+    const sg = ctx.createGain();
+    sg.gain.value = accent ? 0.5 : 0.35;
+    snap.connect(hp).connect(sg).connect(dest);
+    snap.start(t);
+    this._track(snap);
+  }
+
+  // A short burst of decaying noise.
+  _noise(seconds) {
+    const len = Math.floor(this.ctx.sampleRate * seconds);
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len) ** 2;
+    return buf;
   }
 
   // Clean reference pitch, independent of playback so it never cuts a take off.
