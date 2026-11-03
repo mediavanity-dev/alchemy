@@ -300,12 +300,18 @@ export function detectTempo(notes, bpm = null) {
   return { bpm: best.bpm, beat: best.beat, downbeat: best.phase + k * best.beat, steady: best.r > 0.5 };
 }
 
+// Time signatures on offer. The tempo counts the pulse (quarters, or eighths in x/8),
+// so a bar is simply the top number of beats.
+export const METERS = ['2/4', '3/4', '4/4', '5/4', '6/8', '7/8'];
+export const barBeats = (meter) => parseInt(meter ?? '4/4', 10) || 4;
+
 export function beatsBetween(tempo, start, end) {
   const out = [];
+  const n = barBeats(tempo.meter);
   for (let k = Math.ceil((start - tempo.downbeat) / tempo.beat - 1e-6); ; k++) {
     const t = tempo.downbeat + k * tempo.beat;
     if (t > end) break;
-    out.push({ t, accent: ((k % 4) + 4) % 4 === 0 });
+    out.push({ t, accent: ((k % n) + n) % n === 0 });
   }
   return out;
 }

@@ -1,5 +1,5 @@
 import { extractTrack, segmentNotes, livePitch, normalizeLoudness } from './pitch.js';
-import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing, detectTempo, beatsBetween, rankChords } from './theory.js';
+import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing, detectTempo, beatsBetween, rankChords, METERS, barBeats } from './theory.js';
 import { Synth } from './synth.js';
 import { tuneClip, targetFn } from './tune.js';
 import * as store from './db.js';
@@ -26,7 +26,7 @@ const state = {
   trimming: null,
   toneOctave: null,
   editing: null,
-  countIn: { on: false, bpm: 100 },
+  countIn: { on: false, bpm: 100, meter: '4/4' },
   metronome: false,
 };
 
@@ -200,16 +200,18 @@ async function startRecording() {
   else $('#capturePrompt').textContent = 'Listening…';
 }
 
-// Four clicks, shown as 4-3-2-1; the take starts on the beat after "1". Everything
-// the mic hears before then (including the clicks) is discarded.
+// One bar of clicks counted down (4-3-2-1 in 4/4); the take starts on the beat after
+// "1". Everything the mic hears before then (including the clicks) is discarded.
 function startCountIn() {
   const ctx = synth.ctx;
-  const beat = 60 / state.countIn.bpm;
+  const { bpm, meter } = state.countIn;
+  const beat = 60 / bpm;
+  const n = barBeats(meter);
   const t0 = ctx.currentTime + 0.3;
-  synth.countIn(t0, beat, 4);
+  synth.countIn(t0, beat, n);
   // Align the take with when the singer actually hears the beat, plus the mic's own delay.
   const outLatency = ctx.outputLatency || ctx.baseLatency || 0;
-  Object.assign(rec, { counting: true, countT0: t0, beat, bpm: state.countIn.bpm, startAt: t0 + 4 * beat + outLatency + rec.mic.latency });
+  Object.assign(rec, { counting: true, countT0: t0, beat, bpm, meter, bar: n, startAt: t0 + n * beat + outLatency + rec.mic.latency });
   $('#capturePrompt').textContent = 'Get ready…';
   const noteEl = $('#liveNote');
   noteEl.classList.add('count');
@@ -219,7 +221,7 @@ function startCountIn() {
   const step = () => {
     if (rec !== r || !r.counting) return;
     const k = Math.floor((ctx.currentTime - r.countT0) / r.beat);
-    if (k >= 4) {
+    if (k >= r.bar) {
       r.counting = false;
       noteEl.classList.remove('count');
       resetLive();
@@ -227,8 +229,8 @@ function startCountIn() {
       haptic(15);
       return;
     }
-    if (k >= 0 && noteEl.textContent !== String(4 - k)) {
-      noteEl.textContent = 4 - k;
+    if (k >= 0 && noteEl.textContent !== String(r.bar - k)) {
+      noteEl.textContent = r.bar - k;
       haptic(8);
     }
     requestAnimationFrame(step);
@@ -237,32 +239,28 @@ function startCountIn() {
   startBeatGuide(r, t0 + outLatency);
 }
 
-// Silent visual pulse in tempo: four dots (beat 1 accented) and a ring flash,
+// Silent visual pulse in tempo: one bar of dots (beat 1 accented) and a ring flash,
 // timed to when each click reaches the singer's ears. Runs from the count-in
 // through the whole take.
 function startBeatGuide(r, gridT0) {
   const ctx = synth.ctx;
   const wrap = $('#beatDots');
+  wrap.innerHTML = '<i></i>'.repeat(r.bar);
   const dots = [...wrap.children];
   const ring = $('#recRing');
-  const flash = $('#beatFlash');
   wrap.hidden = false;
   const frame = () => {
     if (rec !== r) {
       wrap.hidden = true;
       dots.forEach((d) => d.classList.remove('on'));
       ring.classList.remove('beat');
-      flash.classList.remove('on', 'accent');
       return;
     }
     const pos = (ctx.currentTime - gridT0) / r.beat;
     const k = Math.floor(pos), frac = pos - k;
-    const idx = pos < 0 ? -1 : k % 4;
+    const idx = pos < 0 ? -1 : k % r.bar;
     dots.forEach((d, i) => d.classList.toggle('on', i === idx && frac < 0.55));
-    const hit = pos >= 0 && frac < 0.18;
-    ring.classList.toggle('beat', hit);
-    flash.classList.toggle('on', hit);
-    flash.classList.toggle('accent', hit && idx === 0);
+    ring.classList.toggle('beat', pos >= 0 && frac < 0.18);
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
@@ -341,7 +339,7 @@ function drawLive() {
     g.fillStyle = token('--gold');
     for (let k = Math.max(0, Math.ceil((now - span) / rec.beat)); k * rec.beat <= now; k++) {
       const bx = w - 6 - ((now - k * rec.beat) / span) * (w - left - 6);
-      const bar = k % 4 === 0;
+      const bar = k % rec.bar === 0;
       g.globalAlpha = bar ? 0.5 : 0.2;
       g.fillRect(Math.round(bx), 0, bar ? 2 : 1, h);
     }
@@ -395,14 +393,18 @@ async function stopRecording() {
     return;
   }
   // With a count-in, the beat grid is known exactly: the take starts on a downbeat.
-  const tempo = r.bpm ? { bpm: r.bpm, beat: 60 / r.bpm, downbeat: 0, steady: true, manual: true, source: 'countin' } : null;
+  const tempo = r.bpm ? { bpm: r.bpm, beat: 60 / r.bpm, downbeat: 0, steady: true, manual: true, source: 'countin', meter: r.meter } : null;
   await processAudio(concat(r.chunks, r.length), r.sr, defaultName(), tempo);
 }
 
 /* ---------- count-in ---------- */
 
 function loadCountIn() {
-  try { return { on: false, bpm: 100, ...JSON.parse(localStorage.getItem('alchemy.countIn') ?? '{}') }; } catch { return { on: false, bpm: 100 }; }
+  const fallback = { on: false, bpm: 100, meter: '4/4' };
+  try {
+    const saved = { ...fallback, ...JSON.parse(localStorage.getItem('alchemy.countIn') ?? '{}') };
+    return METERS.includes(saved.meter) ? saved : { ...saved, meter: '4/4' };
+  } catch { return fallback; }
 }
 
 function saveCountIn() {
@@ -411,18 +413,23 @@ function saveCountIn() {
 }
 
 function renderCountIn() {
-  const { on, bpm } = state.countIn;
+  const { on, bpm, meter } = state.countIn;
   $('#countBtn').setAttribute('aria-pressed', String(on));
-  $('#countText').textContent = on ? `Count-in · ${bpm} bpm` : 'Count-in off';
+  $('#countText').textContent = on ? `Count-in · ${bpm} bpm · ${meter}` : 'Count-in off';
 }
+
+// A row of time signatures for a sheet; buttons carry data-meter.
+const meterSeg = (current) => `<div class="seg meter-seg" role="group" aria-label="Time signature">
+  ${METERS.map((m) => `<button data-meter="${m}" class="${m === current ? 'active' : ''}">${m}</button>`).join('')}
+</div>`;
 
 $('#countBtn').addEventListener('click', openCountInSheet);
 
 function openCountInSheet() {
-  const { on, bpm } = state.countIn;
+  const { on, bpm, meter } = state.countIn;
   openSheet(`<div class="count-sheet">
     <h3>Count-in</h3>
-    <p class="sub">Four clicks (4, 3, 2, 1) before recording starts, so you come in on time. The clicks stop on the 1 and aren't recorded.</p>
+    <p class="sub">One bar of clicks (4, 3, 2, 1 in 4/4) before recording starts, so you come in on time. The clicks stop on the 1 and aren't recorded.</p>
     <div class="seg" role="group" aria-label="Count-in">
       <button data-on="0" class="${on ? '' : 'active'}">Off</button>
       <button data-on="1" class="${on ? 'active' : ''}">On</button>
@@ -436,11 +443,12 @@ function openCountInSheet() {
       <button class="btn" id="countTap">Tap tempo</button>
       <button class="btn" id="countPreview">Preview</button>
     </div>
+    ${meterSeg(meter)}
   </div>`);
 
   const body = $('#sheetBody .count-sheet');
   const setBpm = (v) => {
-    state.countIn = { on: true, bpm: Math.max(40, Math.min(240, Math.round(v))) };
+    state.countIn = { ...state.countIn, on: true, bpm: Math.max(40, Math.min(240, Math.round(v))) };
     saveCountIn();
     openCountInSheet();
   };
@@ -452,9 +460,13 @@ function openCountInSheet() {
       saveCountIn();
       openCountInSheet();
     } else if (b.dataset.step) setBpm(state.countIn.bpm + +b.dataset.step);
-    else if (b.id === 'countPreview') {
+    else if (b.dataset.meter) {
+      state.countIn = { ...state.countIn, on: true, meter: b.dataset.meter };
+      saveCountIn();
+      openCountInSheet();
+    } else if (b.id === 'countPreview') {
       const ctx = synth.ensure();
-      synth.countIn(ctx.currentTime + 0.05, 60 / state.countIn.bpm, 4);
+      synth.countIn(ctx.currentTime + 0.05, 60 / state.countIn.bpm, barBeats(state.countIn.meter));
     } else return;
     haptic();
   });
@@ -636,8 +648,10 @@ function retempo() {
   // A count-in tempo is ground truth for the take; never re-detect it.
   if (take.tempo?.source === 'countin') return;
   const manual = take.tempo?.manual ? take.tempo.bpm : null;
+  const meter = take.tempo?.meter;
   take.tempo = detectTempo(take.notes, manual);
   if (take.tempo && manual) take.tempo.manual = true;
+  if (take.tempo && meter) take.tempo.meter = meter;
 }
 
 function resolvedSegments() {
@@ -694,7 +708,8 @@ function renderHarmony() {
   tempoBtn.hidden = !take.tempo;
   if (take.tempo) {
     const bpm = Math.round(take.tempo.bpm);
-    $('#tempoText').textContent = bpm;
+    const meter = take.tempo.meter ?? '4/4';
+    $('#tempoText').textContent = meter === '4/4' ? bpm : `${bpm} · ${meter}`;
     tempoBtn.setAttribute('aria-pressed', String(state.metronome));
     tempoBtn.setAttribute('aria-label', take.tempo.source === 'countin'
       ? `Metronome ${state.metronome ? 'on' : 'off'}, ${bpm} beats per minute from your count-in.`
@@ -1567,11 +1582,23 @@ function setMetronome(on) {
 function setTempo(bpm, manual = true) {
   const take = state.take;
   bpm = Math.max(40, Math.min(240, Math.round(bpm * 2) / 2));
+  const meter = take.tempo?.meter;
   take.tempo = detectTempo(take.notes, manual ? bpm : null);
   if (manual) take.tempo.manual = true;
+  if (meter) take.tempo.meter = meter;
   markDirty();
   stopPlayback();
   renderHarmony();
+}
+
+// Changes only where the bar lines and accents fall; the beat grid stays put.
+function setMeter(meter) {
+  const take = state.take;
+  take.tempo = { ...take.tempo, meter };
+  markDirty();
+  const wasPlaying = !!state.playing && !layerRec;
+  renderHarmony();
+  if (wasPlaying && state.metronome) startPlayback();
 }
 
 function openTempoSheet() {
@@ -1582,17 +1609,19 @@ function openTempoSheet() {
     // The tempo you recorded to is fixed; only the click can be switched.
     openSheet(`<div class="tempo-sheet">
       <h3>Metronome</h3>
-      <p class="sub">Set by your count-in when you recorded, so it's locked to your take's timing. It clicks only during playback and layer recording.</p>
+      <p class="sub">Tempo set by your count-in, so it's locked to your take's timing. The time signature only moves the accents. It clicks only during playback and layer recording.</p>
       <div class="tempo-row"><div class="tempo-value">${Math.round(t.bpm)}<small>BPM</small></div></div>
+      ${meterSeg(t.meter ?? '4/4')}
       <div class="seg" role="group" aria-label="Click">
         <button data-click="off" class="${state.metronome ? '' : 'active'}">Click off</button>
         <button data-click="on" class="${state.metronome ? 'active' : ''}">Click on</button>
       </div>
     </div>`);
     $('#sheetBody .tempo-sheet').addEventListener('click', (e) => {
-      const b = e.target.closest('[data-click]');
+      const b = e.target.closest('[data-click], [data-meter]');
       if (!b) return;
-      setMetronome(b.dataset.click === 'on');
+      if (b.dataset.meter) { setMeter(b.dataset.meter); haptic(); }
+      else setMetronome(b.dataset.click === 'on');
       openTempoSheet();
     });
     return;
@@ -1610,6 +1639,7 @@ function openTempoSheet() {
       <button class="btn" id="tapTempo">Tap tempo</button>
       <button class="btn" data-mul="2">2×</button>
     </div>
+    ${meterSeg(t.meter ?? '4/4')}
     <div class="seg" role="group" aria-label="Click">
       <button data-click="off" class="${state.metronome ? '' : 'active'}">Click off</button>
       <button data-click="on" class="${state.metronome ? 'active' : ''}">Click on</button>
@@ -1624,6 +1654,7 @@ function openTempoSheet() {
     if (b.dataset.step) setTempo(Math.round(take.tempo.bpm) + +b.dataset.step);
     else if (b.dataset.mul) setTempo(take.tempo.bpm * +b.dataset.mul);
     else if (b.dataset.click) setMetronome(b.dataset.click === 'on');
+    else if (b.dataset.meter) { setMeter(b.dataset.meter); haptic(); }
     else if (b.id === 'tempoReset') setTempo(0, false);
     else return;
     openTempoSheet();

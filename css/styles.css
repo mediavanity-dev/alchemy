@@ -233,14 +233,10 @@ main { flex: 1; position: relative; overflow: hidden; }
 .count-pill[aria-pressed="true"] { color: var(--gold); border-color: var(--gold); }
 .recording .count-pill { visibility: hidden; }
 .beat-dots { display: flex; align-items: center; gap: 8px; height: 16px; }
-.beat-dots i { width: 38px; height: 10px; border-radius: 5px; background: var(--surface-2); transition: background 0.12s, box-shadow 0.12s; }
+.beat-dots i { flex: 0 1 38px; min-width: 18px; height: 10px; border-radius: 5px; background: var(--surface-2); transition: background 0.12s, box-shadow 0.12s; }
 .beat-dots i:first-child { height: 14px; border-radius: 7px; }
 .beat-dots i.on { background: var(--gold); box-shadow: 0 0 14px color-mix(in srgb, var(--gold) 70%, transparent); transition: none; }
 
-/* Whole-screen edge glow on each beat while recording, stronger on beat 1 */
-.beat-flash { position: absolute; inset: 0; z-index: 5; pointer-events: none; box-shadow: inset 0 0 0 0 transparent; transition: box-shadow 0.28s ease-out; }
-.beat-flash.on { box-shadow: inset 0 0 36px 2px color-mix(in srgb, var(--gold) 38%, transparent); transition: none; }
-.beat-flash.on.accent { box-shadow: inset 0 0 60px 6px color-mix(in srgb, var(--gold) 60%, transparent); }
 .rec-ring.beat { box-shadow: 0 0 0 5px color-mix(in srgb, var(--gold) 35%, transparent); }
 .live-note.count { color: var(--gold); font-family: var(--serif); font-weight: 500; }
 .rec-wrap { position: relative; width: 116px; height: 116px; display: grid; place-items: center; }
@@ -350,6 +346,8 @@ main { flex: 1; position: relative; overflow: hidden; }
 .tempo-tools .btn { min-height: 44px; padding: 0 8px; font-size: 14px; }
 .tempo-tools .btn.tapping { background: var(--gold); color: var(--gold-ink); }
 .tempo-reset { display: block; margin: 10px auto 0; }
+.meter-seg { margin: 4px 0 12px; }
+.count-sheet .meter-seg { margin: 4px 0 0; }
 .text-btn {
   display: inline-flex;
   align-items: center;
