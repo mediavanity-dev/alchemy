@@ -369,8 +369,8 @@ main { flex: 1; position: relative; overflow: hidden; }
 .harmony.trimming > :not(.roll):not(#trimBar):not(.transport):not(.key-card) { opacity: 0.3; pointer-events: none; }
 .harmony.trimming .mode-seg { display: none; }
 
-.controls { display: grid; grid-template-columns: 3fr 2fr; gap: 12px; margin-top: 16px; }
-@media (max-width: 359px) { .controls { grid-template-columns: 1fr; } }
+.controls { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+@media (max-width: 459px) { .controls { grid-template-columns: 1fr; } }
 .label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 .seg { display: flex; padding: 3px; border-radius: 12px; background: var(--surface); border: 1px solid var(--line); }
 .seg button { flex: 1; min-height: 36px; padding: 0 4px; border-radius: 9px; font-size: 13px; color: var(--muted); white-space: nowrap; transition: background 0.15s, color 0.15s; }

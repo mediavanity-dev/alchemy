@@ -22,9 +22,18 @@ const QUALITIES = {
   maj7: { iv: [0, 4, 7, 11], suf: 'maj7' },
   m7: { iv: [0, 3, 7, 10], suf: 'm7' },
   m7b5: { iv: [0, 3, 6, 10], suf: 'ø7' },
+  sus4: { iv: [0, 5, 7], suf: 'sus4' },
+  add9: { iv: [0, 4, 7, 2], suf: 'add9' },
+  madd9: { iv: [0, 3, 7, 2], suf: 'm(add9)' },
+  maj6: { iv: [0, 4, 7, 9], suf: '6' },
 };
 
-// [degree, quality, roman, function (Tonic/Subdominant/Dominant), prior, richOnly]
+// Chord sets, each including the ones before it.
+export const PALETTES = ['triads', 'extended', 'chromatic'];
+const TIER = { triads: 0, extended: 1, chromatic: 2, simple: 0, rich: 2 }; // simple/rich: older saves
+
+// [degree, quality, roman, function (Tonic/Subdominant/Dominant), prior, tier]
+// Saved takes refer to chords by position, so new entries only ever go at the end.
 const VOCAB = {
   major: [
     [0, 'maj', 'I', 'T', 1.0], [2, 'min', 'ii', 'S', 0.7], [4, 'min', 'iii', 'T', 0.45],
@@ -32,8 +41,10 @@ const VOCAB = {
     [11, 'dim', 'vii°', 'D', 0.15],
     [0, 'maj7', 'Imaj7', 'T', 0.6, 1], [2, 'm7', 'ii7', 'S', 0.6, 1], [4, 'm7', 'iii7', 'T', 0.3, 1],
     [5, 'maj7', 'IVmaj7', 'S', 0.55, 1], [7, 'dom7', 'V7', 'D', 0.75, 1], [9, 'm7', 'vi7', 'T', 0.5, 1],
-    [5, 'min', 'iv', 'S', 0.4, 1], [8, 'maj', '♭VI', 'S', 0.3, 1], [10, 'maj', '♭VII', 'S', 0.4, 1],
-    [2, 'dom7', 'V7/V', 'D', 0.35, 1], [4, 'dom7', 'V7/vi', 'D', 0.3, 1], [0, 'dom7', 'V7/IV', 'D', 0.25, 1],
+    [5, 'min', 'iv', 'S', 0.4, 2], [8, 'maj', '♭VI', 'S', 0.3, 2], [10, 'maj', '♭VII', 'S', 0.4, 2],
+    [2, 'dom7', 'V7/V', 'D', 0.35, 2], [4, 'dom7', 'V7/vi', 'D', 0.3, 2], [0, 'dom7', 'V7/IV', 'D', 0.25, 2],
+    [0, 'sus4', 'Isus4', 'T', 0.3, 1], [7, 'sus4', 'Vsus4', 'D', 0.35, 1], [0, 'add9', 'Iadd9', 'T', 0.4, 1],
+    [5, 'add9', 'IVadd9', 'S', 0.35, 1], [0, 'maj6', 'I6', 'T', 0.3, 1],
   ],
   minor: [
     [0, 'min', 'i', 'T', 1.0], [2, 'dim', 'ii°', 'S', 0.3], [3, 'maj', 'III', 'T', 0.6],
@@ -41,12 +52,18 @@ const VOCAB = {
     [8, 'maj', 'VI', 'S', 0.8], [10, 'maj', 'VII', 'D', 0.7],
     [0, 'm7', 'i7', 'T', 0.55, 1], [2, 'm7b5', 'iiø7', 'S', 0.35, 1], [3, 'maj7', 'IIImaj7', 'T', 0.4, 1],
     [5, 'm7', 'iv7', 'S', 0.5, 1], [7, 'dom7', 'V7', 'D', 0.75, 1], [8, 'maj7', 'VImaj7', 'S', 0.5, 1],
-    [5, 'maj', 'IV', 'S', 0.35, 1], [1, 'maj', '♭II', 'S', 0.2, 1],
+    [5, 'maj', 'IV', 'S', 0.35, 2], [1, 'maj', '♭II', 'S', 0.2, 2],
+    [7, 'sus4', 'Vsus4', 'D', 0.35, 1], [0, 'madd9', 'i(add9)', 'T', 0.35, 1], [8, 'add9', 'VIadd9', 'S', 0.3, 1],
   ],
 };
 
 // Chord length, in multiples of the singer's typical note spacing.
 const RHYTHM = { slow: 6, medium: 4, fast: 2 };
+// With a beat grid: beats per chord at "fast" for each bar length (half bars, odd meters split long-short).
+const FAST_GROUPS = { 2: [1, 1], 3: [2, 1], 4: [2, 2], 5: [3, 2], 6: [3, 3], 7: [4, 3] };
+const MIDBAR_HOLD = 0.3;
+const COLOR_UNSUNG = 0.15;
+const PASS_WEIGHT = 0.35;
 
 export const pc = (m) => ((Math.round(m) % 12) + 12) % 12;
 
@@ -98,21 +115,49 @@ export function detectKeys(notes) {
   return keys;
 }
 
-function buildVocab(key, palette) {
+// Every chord the key offers, indexed by id; `choices` picks the palette's subset.
+function buildVocab(key) {
   const scale = scalePcs(key);
-  return VOCAB[key.mode]
-    .filter((e) => !e[5] || palette === 'rich')
-    .map(([deg, quality, roman, func, prior], id) => {
-      const root = (key.tonic + deg) % 12;
-      const iv = QUALITIES[quality].iv;
-      const tones = iv.map((x) => (root + x) % 12);
-      return {
-        id, deg, root, quality, roman, func, prior, tones,
-        seventh: iv.length > 3 ? tones[3] : null,
-        chromatic: tones.some((t) => !scale.has(t)),
-        symbol: spell(root, key, roman.includes('♭')) + QUALITIES[quality].suf,
-      };
-    });
+  return VOCAB[key.mode].map(([deg, quality, roman, func, prior, tier = 0], id) => {
+    const root = (key.tonic + deg) % 12;
+    const iv = QUALITIES[quality].iv;
+    const tones = iv.map((x) => (root + x) % 12);
+    return {
+      id, deg, root, quality, roman, func, prior, tier, tones,
+      color: iv.length > 3 ? tones[3] : null, // the 7th, 6th or 9th on top of the triad
+      chromatic: tones.some((t) => !scale.has(t)),
+      symbol: spell(root, key, roman.includes('♭')) + QUALITIES[quality].suf,
+    };
+  });
+}
+
+const choicesFor = (vocab, palette) => vocab.filter((c) => c.tier <= (TIER[palette] ?? 0));
+
+// How much each note counts towards choosing a chord, and whether it can be heard
+// as a passing or neighbour note (short, stepped into and out of) rather than
+// something the chord has to contain. With a beat grid, notes on strong beats count
+// more and passing notes can't fall on the downbeat.
+function annotate(notes, tempo) {
+  const durs = notes.map((n) => n.end - n.start).sort((a, b) => a - b);
+  const medDur = durs[durs.length >> 1] || 0.3;
+  const per = tempo ? barBeats(tempo.meter) : 0;
+  return notes.map((n, i) => {
+    const prev = notes[i - 1], next = notes[i + 1];
+    const dur = n.end - n.start;
+    const step = (a) => a && Math.abs(a.midi - n.midi) >= 0.5 && Math.abs(a.midi - n.midi) <= 2.5;
+    let accent = 1, downbeat = false;
+    if (tempo) {
+      const pos = (n.start - tempo.downbeat) / tempo.beat;
+      const k = Math.round(pos);
+      const idx = ((k % per) + per) % per;
+      if (Math.abs(pos - k) > 0.2) accent = 0.75;
+      else if (idx === 0) { accent = 1.4; downbeat = true; }
+      else if (per % 2 === 0 && idx === per / 2) accent = 1.15;
+    }
+    const pass = !downbeat && dur <= medDur * 1.2 && step(prev) && step(next) &&
+      n.start - prev.end < 0.25 && next.start - n.end < 0.25;
+    return { pc: pc(n.midi), start: n.start, end: n.end, accent, pass, long: dur >= medDur * 1.8 };
+  });
 }
 
 // Split the melody into chord-length windows. Window size scales with the
@@ -154,42 +199,85 @@ function makeWindows(notes, rhythm) {
   return wins;
 }
 
-// The pitch classes sounding in [s, e], weighted by how long they sound.
+// With a known beat grid, chords change on bar lines: every two bars (slow), every
+// bar (medium) or every half bar (fast). A pickup before the first full chord, or a
+// sliver after the last, joins its neighbour.
+function makeGridWindows(notes, rhythm, tempo) {
+  const per = barBeats(tempo.meter);
+  const groups = rhythm === 'fast' ? FAST_GROUPS[per] ?? [per] : rhythm === 'slow' ? [per * 2] : [per];
+  const cycle = groups.reduce((a, b) => a + b, 0) * tempo.beat;
+  const t0 = notes[0].start;
+  const t1 = notes[notes.length - 1].end;
+  const minLen = groups[groups.length - 1] * tempo.beat * 0.5;
+
+  const bounds = [t0], weak = new Set();
+  let c = tempo.downbeat + Math.floor((t0 - tempo.downbeat) / cycle) * cycle;
+  for (; c < t1; c += cycle) {
+    let t = c;
+    groups.forEach((g, k) => {
+      if (t > t0 + minLen && t < t1 - minLen) {
+        bounds.push(t);
+        if (k > 0) weak.add(t);
+      }
+      t += g * tempo.beat;
+    });
+  }
+  bounds.push(t1);
+
+  const wins = [];
+  for (let i = 0; i < bounds.length - 1; i++) {
+    wins.push({ ...windowOver(notes, bounds[i], bounds[i + 1]), midBar: weak.has(bounds[i]) });
+  }
+  return wins;
+}
+
+// The pitch classes sounding in [s, e], weighted by how long they sound and how
+// strong a beat they start on.
 function windowOver(notes, s, e) {
   const items = [];
   for (const n of notes) {
     const ov = Math.min(e, n.end) - Math.max(s, n.start);
-    if (ov > 0) items.push({ pc: pc(n.midi), w: ov, start: n.start });
+    if (ov > 0) items.push({ ...n, w: ov * (n.accent ?? 1) * (n.pass ? PASS_WEIGHT : 1) });
   }
-  // The note sounding as the chord arrives matters most.
+  // The note sounding as the chord arrives matters most, unless it's only passing through.
   if (items.length) {
     const lead = items.reduce((a, x) => (Math.abs(x.start - s) < Math.abs(a.start - s) ? x : a));
-    lead.w *= 1.5;
+    if (!lead.pass) lead.w *= 1.5;
   }
   const total = items.reduce((a, x) => a + x.w, 0);
   return { start: s, end: e, items, total };
 }
 
 // Best-fitting chords for an arbitrary stretch, e.g. after the user moves a chord.
-export function rankChords(notes, key, vocab, start, end) {
+export function rankChords(notes, key, vocab, start, end, { palette = 'triads', tempo = null } = {}) {
   const scale = scalePcs(key);
-  const win = windowOver(notes, start, end);
-  const ranked = vocab.map((c) => ({ chord: c, score: emission(c, win, scale) })).sort((a, b) => b.score - a.score);
+  const win = windowOver(annotate(notes, tempo), start, end);
+  const ranked = choicesFor(vocab, palette)
+    .map((c) => ({ chord: c, score: emission(c, win, scale) }))
+    .sort((a, b) => b.score - a.score);
   return { ranked, pcs: [...new Set(win.items.map((it) => it.pc))] };
 }
 
 function emission(c, win, scale) {
   if (win.total <= 1e-6) return 0.25 * c.prior;
-  let s = 0;
+  let s = 0, colorW = 0;
+  // A 7th, 6th or 9th (or a sus 4th) should be there because the melody sings it.
+  const special = c.color ?? (c.quality === 'sus4' ? c.tones[1] : null);
   for (const it of win.items) {
     let v;
+    if (it.pc === special) colorW += it.w;
     if (it.pc === c.root) v = 1.1;
-    else if (c.tones.includes(it.pc)) v = it.pc === c.seventh ? 0.85 : 1;
-    else if (scale.has(it.pc)) v = -0.3;
-    else v = -0.7;
+    else if (c.tones.includes(it.pc)) v = it.pc === c.color ? 0.85 : 1;
+    else if (it.pass) v = scale.has(it.pc) ? -0.05 : -0.25;
+    else if (scale.has(it.pc)) {
+      // A long note a semitone off a chord tone rubs; other non-chord notes are milder.
+      const rub = c.tones.some((t) => (it.pc - t + 12) % 12 === 1 || (t - it.pc + 12) % 12 === 1);
+      v = it.long && rub ? -0.55 : -0.3;
+    } else v = -0.7;
     s += v * it.w;
   }
-  return s / win.total + 0.25 * c.prior - (c.tones.length > 3 ? 0.08 : 0) - (c.chromatic ? 0.05 : 0);
+  const unsung = special != null && colorW < 0.15 * win.total ? COLOR_UNSUNG : 0;
+  return s / win.total + 0.25 * c.prior - (c.tones.length > 3 ? 0.08 : 0) - unsung - (c.chromatic ? 0.05 : 0);
 }
 
 const FUNC_MOVES = { TS: 0.12, SD: 0.18, DT: 0.25, ST: 0.04, TD: 0.06, DS: -0.15, TT: -0.02, DD: 0.02, SS: 0 };
@@ -207,12 +295,15 @@ function transition(a, b) {
 
 // Viterbi search over the chord vocabulary: each window's chord should fit the
 // notes sung over it, and the sequence should move like a real progression.
-export function harmonize(notes, key, { rhythm = 'medium', palette = 'simple' } = {}) {
-  const vocab = buildVocab(key, palette);
+// Pass `tempo` only when its beat grid can be trusted (a count-in, or set by hand).
+export function harmonize(notes, key, { rhythm = 'medium', palette = 'triads', tempo = null } = {}) {
+  const all = buildVocab(key);
+  const vocab = choicesFor(all, palette);
   const scale = scalePcs(key);
-  const wins = makeWindows(notes, rhythm);
+  const ann = annotate(notes, tempo);
+  const wins = tempo ? makeGridWindows(ann, rhythm, tempo) : makeWindows(ann, rhythm);
   const E = wins.map((w) => vocab.map((c) => emission(c, w, scale)));
-  const N = vocab.length, T = wins.length, TW = 0.7;
+  const N = vocab.length, T = wins.length, TW = 0.4;
   const isTonic = (c) => c.deg === 0 && c.func === 'T';
 
   let prev = vocab.map((c, j) => E[0][j] + (isTonic(c) ? 0.3 : 0));
@@ -225,6 +316,8 @@ export function harmonize(notes, key, { rhythm = 'medium', palette = 'simple' } 
       for (let i = 0; i < N; i++) {
         let v = prev[i] + TW * transition(vocab[i], vocab[j]);
         if (empty && i === j) v += 0.6;
+        // Mid-bar changes need the notes to ask for them.
+        if (wins[t].midBar && i === j) v += MIDBAR_HOLD;
         if (v > best) { best = v; bi = i; }
       }
       cur[j] = best + E[t][j];
@@ -246,7 +339,7 @@ export function harmonize(notes, key, { rhythm = 'medium', palette = 'simple' } 
   const segments = [];
   path.forEach((j, t) => {
     const last = segments[segments.length - 1];
-    if (last && last.chord.id === j) {
+    if (last && last.chord === vocab[j]) {
       last.end = wins[t].end;
       last.wins.push(t);
     } else {
@@ -266,7 +359,7 @@ export function harmonize(notes, key, { rhythm = 'medium', palette = 'simple' } 
     seg.pcs = [...pcs];
   }
 
-  return { vocab, segments };
+  return { vocab: all, segments };
 }
 
 // Estimates a beat grid from note onsets: for each candidate tempo, measure how

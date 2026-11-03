@@ -18,7 +18,7 @@ const state = {
   keys: [],
   keyIdx: 0,
   rhythm: 'medium',
-  palette: 'simple',
+  palette: 'triads',
   mode: 'voice',
   harmony: null,
   overrides: {},
@@ -590,7 +590,7 @@ function loadTake(take, saved = {}) {
   state.keys = detectKeys(analysisNotes());
   state.keyIdx = Math.min(saved.keyIdx ?? 0, state.keys.length - 1);
   state.rhythm = saved.rhythm ?? state.rhythm;
-  state.palette = saved.palette ?? state.palette;
+  state.palette = { simple: 'triads', rich: 'chromatic' }[saved.palette] ?? saved.palette ?? state.palette;
   reharmonize();
   state.overrides = saved.overrides ?? {};
   // Chord timing the user edited by hand
@@ -605,9 +605,10 @@ function loadTake(take, saved = {}) {
 
 // Refreshes a chord's suggestions (and the notes under it) after its timing or notes changed.
 function refitSegment(seg) {
-  const { ranked, pcs } = rankChords(analysisNotes(), state.keys[state.keyIdx], state.harmony.vocab, seg.start, seg.end);
+  const { ranked, pcs } = rankChords(analysisNotes(), state.keys[state.keyIdx], state.harmony.vocab, seg.start, seg.end, harmonyOptions());
   seg.alts = ranked.slice(0, 6);
-  if (!seg.alts.some((a) => a.chord === seg.chord)) seg.alts[seg.alts.length - 1] = ranked.find((a) => a.chord === seg.chord);
+  // Keep the current chord on the list, even one from outside the chosen chord set.
+  if (!seg.alts.some((a) => a.chord === seg.chord)) seg.alts[seg.alts.length - 1] = ranked.find((a) => a.chord === seg.chord) ?? { chord: seg.chord, score: 0 };
   seg.pcs = pcs;
 }
 
@@ -625,11 +626,25 @@ function markDirty() {
   if (state.take?.id) state.take.dirty = true;
 }
 
+// Chords follow the bar lines only when the beat grid can be trusted: a count-in,
+// or a tempo the user set. A detected tempo is a guess, so it isn't used.
+function harmonyOptions() {
+  const t = state.take?.tempo;
+  return { rhythm: state.rhythm, palette: state.palette, tempo: t && (t.source === 'countin' || t.manual) ? t : null };
+}
+
 function reharmonize() {
   if (!state.take) return;
   state.overrides = {};
-  state.harmony = harmonize(analysisNotes(), state.keys[state.keyIdx], { rhythm: state.rhythm, palette: state.palette });
+  state.harmony = harmonize(analysisNotes(), state.keys[state.keyIdx], harmonyOptions());
   markDirty();
+}
+
+// After the beat grid changed: re-fit chords to the new bar lines, unless the user
+// has already picked or shaped chords by hand.
+function regrid() {
+  if (Object.keys(state.overrides).length || hasEdits()) return;
+  reharmonize();
 }
 
 // Full re-analysis after the material changed (trim, layer opted in or out).
@@ -1207,7 +1222,7 @@ function splitAt(t) {
   }
   const at = nearest(pts, t);
   const right = { start: at, end: seg.end, edited: true };
-  right.chord = rankChords(analysisNotes(), state.keys[state.keyIdx], state.harmony.vocab, at, seg.end).ranked[0].chord;
+  right.chord = rankChords(analysisNotes(), state.keys[state.keyIdx], state.harmony.vocab, at, seg.end, harmonyOptions()).ranked[0].chord;
   seg.end = at;
   seg.edited = true;
   segs.splice(i + 1, 0, right);
@@ -1588,6 +1603,7 @@ function setTempo(bpm, manual = true) {
   if (meter) take.tempo.meter = meter;
   markDirty();
   stopPlayback();
+  regrid();
   renderHarmony();
 }
 
@@ -1597,6 +1613,10 @@ function setMeter(meter) {
   take.tempo = { ...take.tempo, meter };
   markDirty();
   const wasPlaying = !!state.playing && !layerRec;
+  if (harmonyOptions().tempo) {
+    stopPlayback();
+    regrid();
+  }
   renderHarmony();
   if (wasPlaying && state.metronome) startPlayback();
 }
