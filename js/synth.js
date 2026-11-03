@@ -116,6 +116,23 @@ export class Synth {
     this._track(osc);
   }
 
+  // Short woodblock-ish tick; the first beat of each bar is brighter.
+  click(t, accent = false) {
+    const ctx = this.ctx;
+    const env = ctx.createGain();
+    env.connect(this.out);
+    env.gain.setValueAtTime(accent ? 0.32 : 0.2, t);
+    env.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(accent ? 1900 : 1300, t);
+    osc.frequency.exponentialRampToValueAtTime(accent ? 1400 : 950, t + 0.05);
+    osc.connect(env);
+    osc.start(t);
+    osc.stop(t + 0.06);
+    this._track(osc);
+  }
+
   // Clean reference pitch, independent of playback so it never cuts a take off.
   tone(midi, dur = 3, onEnd) {
     const ctx = this.ensure();

@@ -259,6 +259,47 @@ export function harmonize(notes, key, { rhythm = 'medium', palette = 'simple' } 
   return { vocab, segments };
 }
 
+// Estimates a beat grid from note onsets: for each candidate tempo, measure how
+// tightly the onsets line up on that grid (circular mean of their phase), allowing
+// for eighth-note subdivisions and favouring everyday tempos. Pass `bpm` to keep a
+// tempo fixed and only find where its beats fall.
+export function detectTempo(notes, bpm = null) {
+  if (notes.length < 4) return null;
+  const onsets = notes.map((n) => ({ t: n.start, w: Math.min(1, 0.4 + (n.end - n.start)) }));
+  const align = (P) => {
+    let sx = 0, sy = 0, sw = 0;
+    for (const o of onsets) {
+      const a = (2 * Math.PI * o.t) / P;
+      sx += o.w * Math.cos(a);
+      sy += o.w * Math.sin(a);
+      sw += o.w;
+    }
+    return { r: Math.hypot(sx, sy) / sw, phase: (((Math.atan2(sy, sx) / (2 * Math.PI)) * P) % P + P) % P };
+  };
+
+  let best = null;
+  for (let b = bpm ?? 50; b <= (bpm ?? 200); b += 0.5) {
+    const P = 60 / b;
+    const on = align(P);
+    const prior = bpm ? 1 : Math.exp(-0.5 * (Math.log2(b / 105) / 0.6) ** 2);
+    const score = (0.7 * on.r + 0.3 * align(P / 2).r) * prior;
+    if (!best || score > best.score) best = { bpm: b, beat: P, phase: on.phase, r: on.r, score };
+  }
+  // Treat the beat nearest the first note as the first downbeat.
+  const k = Math.round((notes[0].start - best.phase) / best.beat);
+  return { bpm: best.bpm, beat: best.beat, downbeat: best.phase + k * best.beat, steady: best.r > 0.5 };
+}
+
+export function beatsBetween(tempo, start, end) {
+  const out = [];
+  for (let k = Math.ceil((start - tempo.downbeat) / tempo.beat - 1e-6); ; k++) {
+    const t = tempo.downbeat + k * tempo.beat;
+    if (t > end) break;
+    out.push({ t, accent: ((k % 4) + 4) % 4 === 0 });
+  }
+  return out;
+}
+
 export function voicing(chord) {
   const bass = 36 + chord.root;
   const upper = chord.tones.map((p) => 55 + ((p - 7 + 12) % 12)).sort((a, b) => a - b);

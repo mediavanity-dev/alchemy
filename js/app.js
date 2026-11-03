@@ -1,5 +1,5 @@
 import { extractTrack, segmentNotes, livePitch } from './pitch.js';
-import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing } from './theory.js';
+import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing, detectTempo, beatsBetween } from './theory.js';
 import { Synth } from './synth.js';
 import * as store from './db.js';
 
@@ -7,6 +7,7 @@ const $ = (sel) => document.querySelector(sel);
 const MAX_SECONDS = 45;
 const MAX_IMPORT_SECONDS = 90;
 const MAX_LAYERS = 6;
+const MAX_LAYER_SECONDS = 90;
 const MIN_TRIM = 1;
 
 const synth = new Synth();
@@ -23,6 +24,7 @@ const state = {
   playing: null,
   trimming: null,
   toneOctave: null,
+  metronome: false,
 };
 
 /* ---------- helpers ---------- */
@@ -391,6 +393,7 @@ function loadTake(take, saved = {}) {
   state.trimming = null;
   take.layers ??= [];
   take.trim ??= { start: 0, end: take.duration };
+  take.tempo ??= detectTempo(take.notes);
   state.take = take;
   state.keys = detectKeys(analysisNotes());
   state.keyIdx = Math.min(saved.keyIdx ?? 0, state.keys.length - 1);
@@ -402,11 +405,12 @@ function loadTake(take, saved = {}) {
 }
 
 // The notes the harmony is built from: the (trimmed) take plus any layers the user opted in.
+// Layers may run past the end of the take, so only the trim start bounds them.
 function analysisNotes() {
   const { notes, layers, trim } = state.take;
   const extra = layers
     .filter((l) => l.included)
-    .flatMap((l) => l.notes.filter((n) => n.start >= trim.start - 0.05 && n.end <= trim.end + 0.05));
+    .flatMap((l) => l.notes.filter((n) => n.start >= trim.start - 0.05));
   return [...notes, ...extra].sort((a, b) => a.start - b.start);
 }
 
@@ -424,10 +428,19 @@ function reharmonize() {
 // Full re-analysis after the material changed (trim, layer opted in or out).
 function reanalyze() {
   stopPlayback();
+  retempo();
   state.keys = detectKeys(analysisNotes());
   state.keyIdx = 0;
   reharmonize();
   renderHarmony();
+}
+
+// Re-fit the beat grid to the current notes, keeping a tempo the user set by hand.
+function retempo() {
+  const take = state.take;
+  const manual = take.tempo?.manual ? take.tempo.bpm : null;
+  take.tempo = detectTempo(take.notes, manual);
+  if (take.tempo && manual) take.tempo.manual = true;
 }
 
 function resolvedSegments() {
@@ -435,11 +448,15 @@ function resolvedSegments() {
   return segments.map((s, i) => ({ ...s, chord: state.overrides[i] != null ? vocab[state.overrides[i]] : s.chord }));
 }
 
+// The timeline: the trimmed take, stretched to cover any layer that runs longer.
 function takeRange() {
   const n = analysisNotes();
-  const { trim } = state.take;
-  const last = n.reduce((m, x) => Math.max(m, x.end), 0);
-  return { start: Math.max(trim.start, n[0].start - 0.15), end: Math.min(trim.end, last + 0.3) };
+  const { trim, notes, layers } = state.take;
+  const lastBase = notes.reduce((m, x) => Math.max(m, x.end), 0);
+  let end = Math.min(trim.end, lastBase + 0.3);
+  for (const x of n) end = Math.max(end, x.end + 0.3);
+  for (const l of layers) end = Math.max(end, l.offset + l.duration);
+  return { start: Math.max(trim.start, n[0].start - 0.15), end };
 }
 
 /* ---------- harmony view ---------- */
@@ -469,9 +486,16 @@ function renderHarmony() {
     (included ? ` · +${included} layer${included > 1 ? 's' : ''}` : '');
 
   const trimmed = take.trim.start > 0.05 || take.trim.end < take.duration - 0.05;
-  $('#rollInfo').textContent = trimmed
-    ? `Trimmed to ${fmtTime(take.trim.start)}–${fmtTime(take.trim.end)}`
-    : `${fmtTime(take.duration)} recording`;
+  $('#rollInfo').textContent = trimmed ? `${fmtTime(take.trim.start)}–${fmtTime(take.trim.end)}` : fmtTime(take.duration);
+  $('#rollInfo').title = trimmed ? 'Trimmed section' : 'Recording length';
+  const tempoBtn = $('#tempoBtn');
+  tempoBtn.hidden = !take.tempo;
+  if (take.tempo) {
+    const bpm = Math.round(take.tempo.bpm);
+    $('#tempoText').textContent = bpm;
+    tempoBtn.setAttribute('aria-pressed', String(state.metronome));
+    tempoBtn.setAttribute('aria-label', `Metronome ${state.metronome ? 'on' : 'off'}, ${bpm} beats per minute. Press and hold to adjust.`);
+  }
   $('#layerCount').textContent = take.layers.length || '';
 
   $('#keyChips').innerHTML = state.keys
@@ -521,7 +545,10 @@ function drawRoll(playT = null) {
   const take = state.take;
   const key = state.keys[state.keyIdx];
   const trimming = state.trimming;
-  const { start, end } = trimming ? { start: 0, end: take.duration } : takeRange();
+  const play = state.playing;
+  const { start, end } = trimming
+    ? { start: 0, end: take.duration }
+    : layerRec && play ? { start: play.start, end: play.viewEnd } : takeRange();
   const inView = (n) => n.end > start && n.start < end;
 
   const groups = [
@@ -562,6 +589,16 @@ function drawRoll(playT = null) {
   if (!trimming) {
     g.fillStyle = cLane;
     for (const s of segs.slice(1)) g.fillRect(Math.round(x(s.start)), top, 1, rollH);
+  }
+
+  // Beat marks along the top edge while the metronome is on
+  if (!trimming && state.metronome && take.tempo) {
+    g.fillStyle = cFaint;
+    for (const b of beatsBetween(take.tempo, start, end)) {
+      g.globalAlpha = b.accent ? 0.9 : 0.45;
+      g.fillRect(Math.round(x(b.t)), 1, b.accent ? 2 : 1, b.accent ? 7 : 4);
+    }
+    g.globalAlpha = 1;
   }
 
   g.save();
@@ -795,8 +832,13 @@ function startPlayback() {
     if (state.mode === 'melody') {
       for (const n of analysisNotes()) if (n.start >= start && n.start < end) synth.lead(n.midi, t0 + n.start - start, n.end - n.start);
     }
+    if (state.metronome && take.tempo) {
+      // While recording a layer the click keeps going past the end of the take.
+      const clickEnd = layerRec ? start + MAX_LAYER_SECONDS : end;
+      for (const b of beatsBetween(take.tempo, start, clickEnd)) synth.click(t0 + b.t - start, b.accent);
+    }
   }
-  state.playing = { t0, start, end, raf: 0, seg: -1 };
+  state.playing = { t0, start, end, viewEnd: end, raf: 0, seg: -1 };
   $('#playBtn').classList.add('playing');
   $('#playBtn').setAttribute('aria-label', 'Stop');
   tick();
@@ -806,13 +848,17 @@ function tick() {
   const p = state.playing;
   if (!p) return;
   const t = p.start + (synth.ctx.currentTime - p.t0);
-  if (t >= p.end + 0.6) {
-    if (layerRec) stopLayer();
-    else stopPlayback();
-    return;
+  if (layerRec) {
+    // A layer keeps recording past the end of the take until the user stops it;
+    // the view widens to make room.
+    if (t - p.start >= MAX_LAYER_SECONDS) { stopLayer(); return; }
+    p.viewEnd = Math.max(p.end, t + 1);
+    drawRoll(Math.max(p.start, t));
+    updateTransportStatus(`Recording ${layerRec.name} · ${fmtTime(Math.max(0, t - p.start))}${t > p.end ? ' · tap ■ to finish' : ''}`);
+  } else {
+    if (t >= p.end + 0.6) { stopPlayback(); return; }
+    drawRoll(Math.max(p.start, Math.min(t, p.end)));
   }
-  drawRoll(Math.max(p.start, Math.min(t, p.end)));
-  if (layerRec) updateTransportStatus(`Recording ${layerRec.name} · ${fmtTime(Math.max(0, t - p.start))}`);
   if (!state.trimming) {
     const idx = resolvedSegments().findIndex((s) => t >= s.start && t < s.end);
     if (idx !== p.seg) {
@@ -942,7 +988,7 @@ function openLayersSheet() {
 
   openSheet(`
     <h3>Layers</h3>
-    <p class="sub">Sing more parts over your take, ideally with headphones so the playback stays out of the mic. A new layer only changes the key and chords once you turn on <b>Harmony</b>.</p>
+    <p class="sub">Sing more parts over your take, ideally with headphones so the playback stays out of the mic. Keep going past the end if you like; recording runs until you tap stop. A new layer only changes the key and chords once you turn on <b>Harmony</b>.</p>
     <div class="layer-list">${rows || '<div class="layer-empty">No layers yet</div>'}</div>
     <button class="btn primary block" id="layerRecord" ${full ? 'disabled' : ''}><span class="dot"></span>${full ? 'Layer limit reached' : 'Record a layer'}</button>`);
 
@@ -976,6 +1022,108 @@ function openLayersSheet() {
     }
     haptic();
     openLayersSheet();
+  });
+}
+
+/* ---------- metronome ---------- */
+
+// Tap toggles the click; press and hold opens tempo adjustments.
+(() => {
+  const btn = $('#tempoBtn');
+  let hold = null, held = false;
+  const cancel = () => { clearTimeout(hold); hold = null; };
+  btn.addEventListener('pointerdown', () => {
+    held = false;
+    hold = setTimeout(() => { held = true; haptic(15); openTempoSheet(); }, 500);
+  });
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => btn.addEventListener(ev, cancel));
+  btn.addEventListener('contextmenu', (e) => e.preventDefault());
+  btn.addEventListener('click', () => {
+    if (held) { held = false; return; }
+    setMetronome(!state.metronome);
+    if (state.metronome && !setMetronome.hinted) {
+      setMetronome.hinted = true;
+      toast('Metronome on. Press and hold the tempo to adjust it.');
+    }
+  });
+})();
+
+function setMetronome(on) {
+  state.metronome = on;
+  const wasPlaying = !!state.playing && !layerRec;
+  renderHarmony();
+  if (wasPlaying) startPlayback();
+  haptic();
+}
+
+function setTempo(bpm, manual = true) {
+  const take = state.take;
+  bpm = Math.max(40, Math.min(240, Math.round(bpm * 2) / 2));
+  take.tempo = detectTempo(take.notes, manual ? bpm : null);
+  if (manual) take.tempo.manual = true;
+  markDirty();
+  stopPlayback();
+  renderHarmony();
+}
+
+function openTempoSheet() {
+  const take = state.take;
+  if (!take?.tempo) return;
+  const t = take.tempo;
+  openSheet(`<div class="tempo-sheet">
+    <h3>Metronome</h3>
+    <p class="sub">${t.manual ? 'Tempo set by you.' : `Estimated from your take${t.steady ? '' : ', which drifts a little, so it may need a nudge'}.`} It clicks only during playback and layer recording.</p>
+    <div class="tempo-row">
+      <button class="icon-btn" data-step="-1" aria-label="Slower">−</button>
+      <div class="tempo-value">${Math.round(t.bpm)}<small>BPM</small></div>
+      <button class="icon-btn" data-step="1" aria-label="Faster">+</button>
+    </div>
+    <div class="tempo-tools">
+      <button class="btn" data-mul="0.5">½×</button>
+      <button class="btn" id="tapTempo">Tap tempo</button>
+      <button class="btn" data-mul="2">2×</button>
+    </div>
+    <div class="seg" role="group" aria-label="Click">
+      <button data-click="off" class="${state.metronome ? '' : 'active'}">Click off</button>
+      <button data-click="on" class="${state.metronome ? 'active' : ''}">Click on</button>
+    </div>
+    ${t.manual ? '<button class="text-btn tempo-reset" id="tempoReset">Back to detected tempo</button>' : ''}
+    </div>`);
+
+  const body = $('#sheetBody .tempo-sheet');
+  body.addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b || b.id === 'tapTempo') return;
+    if (b.dataset.step) setTempo(Math.round(take.tempo.bpm) + +b.dataset.step);
+    else if (b.dataset.mul) setTempo(take.tempo.bpm * +b.dataset.mul);
+    else if (b.dataset.click) setMetronome(b.dataset.click === 'on');
+    else if (b.id === 'tempoReset') setTempo(0, false);
+    else return;
+    openTempoSheet();
+  });
+
+  const taps = [];
+  $('#tapTempo').addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    const now = performance.now();
+    if (taps.length && now - taps[taps.length - 1] > 2000) taps.length = 0;
+    taps.push(now);
+    const tap = e.currentTarget;
+    tap.classList.add('tapping');
+    setTimeout(() => tap.classList.remove('tapping'), 90);
+    haptic(5);
+    if (taps.length >= 4) {
+      const span = (taps[taps.length - 1] - taps[0]) / (taps.length - 1);
+      const bpm = Math.round(60000 / span);
+      body.querySelector('.tempo-value').firstChild.textContent = bpm;
+      clearTimeout(openTempoSheet.tapTimer);
+      openTempoSheet.tapTimer = setTimeout(() => {
+        setTempo(bpm);
+        if (body.isConnected && $('#sheet').classList.contains('show')) openTempoSheet();
+      }, 1200);
+    } else {
+      tap.textContent = `Tap ${4 - taps.length} more`;
+    }
   });
 }
 
@@ -1113,6 +1261,7 @@ async function saveTake(name) {
     traceT0: take.traceT0,
     hop: take.hop,
     trim: take.trim,
+    tempo: take.tempo,
     layers: take.layers.map(({ samples, buffer, ...rest }) => rest),
     keyIdx: state.keyIdx,
     rhythm: state.rhythm,

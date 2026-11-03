@@ -84,7 +84,13 @@
           <canvas id="rollCanvas" class="roll" aria-label="Melody and chords"></canvas>
 
           <div class="roll-bar" id="rollBar">
-            <span class="roll-info" id="rollInfo"></span>
+            <div class="roll-left">
+              <button class="tempo-btn" id="tempoBtn" aria-pressed="false" hidden>
+                <svg viewBox="0 0 24 24"><path d="M9 3h6l3.5 18h-13zM12 15l5-9M7 16h10" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round"/></svg>
+                <span id="tempoText"></span>
+              </button>
+              <span class="roll-info" id="rollInfo"></span>
+            </div>
             <div class="roll-actions">
               <button class="text-btn" id="trimBtn">
                 <svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="6" cy="18" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8.5 7.5 20 18M8.5 16.5 20 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>

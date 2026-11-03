@@ -289,6 +289,34 @@ main { flex: 1; position: relative; overflow: hidden; }
 .roll-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin: 4px -6px 0 2px; }
 .roll-info { font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .roll-actions { display: flex; gap: 2px; flex: none; }
+.roll-left { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.tempo-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 0 10px 0 8px;
+  margin-left: -4px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+  -webkit-touch-callout: none;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.tempo-btn svg { width: 15px; height: 15px; }
+.tempo-btn[aria-pressed="true"] { color: var(--gold); background: var(--surface); border-color: var(--line); }
+
+.tempo-row { display: flex; align-items: center; justify-content: center; gap: 18px; margin: 4px 0 14px; }
+.tempo-row .icon-btn { width: 48px; height: 48px; font-size: 22px; }
+.tempo-value { min-width: 110px; text-align: center; font-family: var(--serif); font-size: 44px; line-height: 1; color: var(--gold); font-variant-numeric: tabular-nums; }
+.tempo-value small { display: block; margin-top: 4px; font-family: var(--font); font-size: 12px; color: var(--muted); }
+.tempo-tools { display: grid; grid-template-columns: 1fr 1.6fr 1fr; gap: 8px; margin-bottom: 12px; }
+.tempo-tools .btn { min-height: 44px; padding: 0 8px; font-size: 14px; }
+.tempo-tools .btn.tapping { background: var(--gold); color: var(--gold-ink); }
+.tempo-reset { display: block; margin: 10px auto 0; }
 .text-btn {
   display: inline-flex;
   align-items: center;
