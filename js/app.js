@@ -6,6 +6,8 @@ import * as store from './db.js';
 const $ = (sel) => document.querySelector(sel);
 const MAX_SECONDS = 45;
 const MAX_IMPORT_SECONDS = 90;
+const MAX_LAYERS = 6;
+const MIN_TRIM = 1;
 
 const synth = new Synth();
 const state = {
@@ -19,6 +21,8 @@ const state = {
   harmony: null,
   overrides: {},
   playing: null,
+  trimming: null,
+  toneOctave: null,
 };
 
 /* ---------- helpers ---------- */
@@ -26,8 +30,11 @@ const state = {
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const fmtTime = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+const fmtPrecise = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`;
 const haptic = (ms = 10) => { try { navigator.vibrate?.(ms); } catch { /* unsupported */ } };
 const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
+const uid = () => crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const trashIcon = '<svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 function toast(msg, ms = 3400) {
   const el = $('#toast');
@@ -60,38 +67,35 @@ function roundRect(g, x, y, w, h, r) {
   g.closePath();
 }
 
-/* ---------- navigation ---------- */
-
-function showView(name) {
-  if (name !== 'harmony') stopPlayback();
-  state.view = name;
-  document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${name}`));
-  document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.view === name));
-  if (name === 'harmony') renderHarmony();
-  if (name === 'library') renderLibrary();
-  if (name === 'capture') drawLive();
+function concat(chunks, length) {
+  const out = new Float32Array(length);
+  let o = 0;
+  for (const c of chunks) { out.set(c, o); o += c.length; }
+  return out;
 }
 
-document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => { if (!rec) showView(t.dataset.view); }));
-document.querySelectorAll('[data-goto]').forEach((b) => b.addEventListener('click', () => showView(b.dataset.goto)));
-
-/* ---------- capture ---------- */
-
-let rec = null;
-let starting = false;
-let workletReady = false;
-let lastTrace = [];
-let liveCenter = 57;
-let liveRaf = 0;
-
-async function startRecording() {
-  if (starting || rec) return;
-  if (!navigator.mediaDevices?.getUserMedia) {
-    toast('Recording needs a secure (https) connection.');
-    return;
+function normalize(samples) {
+  let peak = 0;
+  for (let i = 0; i < samples.length; i++) peak = Math.max(peak, Math.abs(samples[i]));
+  if (peak > 0.001) {
+    const k = 0.9 / peak;
+    for (let i = 0; i < samples.length; i++) samples[i] *= k;
   }
-  starting = true;
-  stopPlayback();
+  return samples;
+}
+
+function setProcessing(on, progress = 0) {
+  $('#processing').classList.toggle('show', on);
+  $('#processFill').style.height = `${Math.round(progress * 100)}%`;
+}
+
+/* ---------- microphone ---------- */
+
+let workletReady = false;
+
+// Opens the mic and streams raw blocks to onChunk(data, audioClockTime).
+async function openMic(onChunk) {
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error('Recording needs a secure (https) connection.');
   const ctx = synth.ensure();
   let stream;
   try {
@@ -99,11 +103,8 @@ async function startRecording() {
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true },
     });
   } catch {
-    starting = false;
-    toast('Alchemy needs microphone access to hear you.');
-    return;
+    throw new Error('Alchemy needs microphone access to hear you.');
   }
-
   const source = ctx.createMediaStreamSource(stream);
   const sink = ctx.createGain();
   sink.gain.value = 0;
@@ -114,15 +115,68 @@ async function startRecording() {
       workletReady = true;
     }
     node = new AudioWorkletNode(ctx, 'recorder');
-    node.port.onmessage = (e) => onChunk(e.data);
+    node.port.onmessage = (e) => onChunk(e.data.data, e.data.time);
   } else {
     node = ctx.createScriptProcessor(1024, 1, 1);
-    node.onaudioprocess = (e) => onChunk(e.inputBuffer.getChannelData(0).slice());
+    node.onaudioprocess = (e) => onChunk(e.inputBuffer.getChannelData(0).slice(), e.playbackTime - 1024 / ctx.sampleRate);
   }
   source.connect(node);
   node.connect(sink).connect(ctx.destination);
+  const settings = stream.getAudioTracks()[0]?.getSettings?.() ?? {};
+  return {
+    sr: ctx.sampleRate,
+    latency: typeof settings.latency === 'number' ? settings.latency : 0.01,
+    close() {
+      if (node.port) node.port.onmessage = null;
+      else node.onaudioprocess = null;
+      source.disconnect();
+      node.disconnect();
+      sink.disconnect();
+      stream.getTracks().forEach((t) => t.stop());
+    },
+  };
+}
 
-  rec = { stream, source, node, sink, chunks: [], length: 0, sr: ctx.sampleRate, recent: new Float32Array(2048), trace: [] };
+/* ---------- navigation ---------- */
+
+function showView(name) {
+  if (name !== 'harmony') {
+    stopPlayback();
+    state.trimming = null;
+  }
+  state.view = name;
+  document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${name}`));
+  document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.view === name));
+  if (name === 'harmony') renderHarmony();
+  if (name === 'library') renderLibrary();
+  if (name === 'capture') drawLive();
+}
+
+document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => { if (!rec && !layerRec) showView(t.dataset.view); }));
+document.querySelectorAll('[data-goto]').forEach((b) => b.addEventListener('click', () => showView(b.dataset.goto)));
+
+/* ---------- capture ---------- */
+
+let rec = null;
+let starting = false;
+let lastTrace = [];
+let liveCenter = 57;
+let liveRaf = 0;
+
+async function startRecording() {
+  if (starting || rec) return;
+  starting = true;
+  stopPlayback();
+  synth.stopTone();
+  let mic;
+  try {
+    mic = await openMic(onChunk);
+  } catch (e) {
+    starting = false;
+    toast(e.message);
+    return;
+  }
+  rec = { mic, chunks: [], length: 0, sr: mic.sr, recent: new Float32Array(2048), trace: [] };
   starting = false;
 
   document.body.classList.add('recording');
@@ -175,8 +229,8 @@ function resetLive() {
 }
 
 function drawLive() {
+  if (state.view !== 'capture') return;
   const cv = $('#liveCanvas');
-  if (!cv.offsetParent && state.view !== 'capture') return;
   const { g, w, h } = fitCanvas(cv);
   const trace = rec ? rec.trace : lastTrace;
   const now = trace.length ? trace[trace.length - 1].t : 0;
@@ -191,13 +245,11 @@ function drawLive() {
   g.font = '10px ' + token('--font');
   g.textBaseline = 'middle';
   for (let m = Math.ceil(lo); m <= Math.floor(hi); m++) {
-    const natural = [0, 2, 4, 5, 7, 9, 11].includes(pc(m));
-    g.fillStyle = natural ? token('--lane') : 'transparent';
+    if (![0, 2, 4, 5, 7, 9, 11].includes(pc(m))) continue;
+    g.fillStyle = token('--lane');
     g.fillRect(left, y(m) - 0.5, w - left, 1);
-    if (natural) {
-      g.fillStyle = token('--faint');
-      g.fillText(noteLabel(m), 8, y(m));
-    }
+    g.fillStyle = token('--faint');
+    g.fillText(noteLabel(m), 8, y(m));
   }
 
   g.strokeStyle = token('--gold');
@@ -229,12 +281,7 @@ async function stopRecording() {
   const r = rec;
   rec = null;
   clearInterval(r.timer);
-  if (r.node.port) r.node.port.onmessage = null;
-  else r.node.onaudioprocess = null;
-  r.source.disconnect();
-  r.node.disconnect();
-  r.sink.disconnect();
-  r.stream.getTracks().forEach((t) => t.stop());
+  r.mic.close();
   lastTrace = r.trace;
 
   document.body.classList.remove('recording');
@@ -248,10 +295,7 @@ async function stopRecording() {
     toast('That was a bit short. Hum a phrase of a few notes.');
     return;
   }
-  const samples = new Float32Array(r.length);
-  let o = 0;
-  for (const c of r.chunks) { samples.set(c, o); o += c.length; }
-  await processAudio(samples, r.sr, defaultName());
+  await processAudio(concat(r.chunks, r.length), r.sr, defaultName());
 }
 
 function defaultName() {
@@ -309,21 +353,10 @@ $('#demoBtn').addEventListener('click', () => {
 
 /* ---------- analysis ---------- */
 
-function setProcessing(on, progress = 0) {
-  $('#processing').classList.toggle('show', on);
-  $('#processFill').style.height = `${Math.round(progress * 100)}%`;
-}
-
 async function processAudio(samples, sampleRate, name) {
   setProcessing(true, 0.05);
   await nextFrame();
-
-  let peak = 0;
-  for (let i = 0; i < samples.length; i++) peak = Math.max(peak, Math.abs(samples[i]));
-  if (peak > 0.001) {
-    const k = 0.9 / peak;
-    for (let i = 0; i < samples.length; i++) samples[i] *= k;
-  }
+  normalize(samples);
 
   const track = await extractTrack(samples, sampleRate, (p) => setProcessing(true, 0.05 + p * 0.85));
   const { notes, offset, trace, traceT0, hop } = segmentNotes(track);
@@ -336,14 +369,18 @@ async function processAudio(samples, sampleRate, name) {
     return;
   }
 
+  const duration = samples.length / sampleRate;
   loadTake({
     id: null,
     name,
     created: Date.now(),
     sampleRate,
     samples,
-    duration: samples.length / sampleRate,
+    duration,
     notes, offset, trace, traceT0, hop,
+    track,
+    trim: { start: 0, end: duration },
+    layers: [],
   });
   haptic([8, 40, 8]);
   showView('harmony');
@@ -351,9 +388,12 @@ async function processAudio(samples, sampleRate, name) {
 
 function loadTake(take, saved = {}) {
   stopPlayback();
+  state.trimming = null;
+  take.layers ??= [];
+  take.trim ??= { start: 0, end: take.duration };
   state.take = take;
-  state.keys = detectKeys(take.notes);
-  state.keyIdx = saved.keyIdx ?? 0;
+  state.keys = detectKeys(analysisNotes());
+  state.keyIdx = Math.min(saved.keyIdx ?? 0, state.keys.length - 1);
   state.rhythm = saved.rhythm ?? state.rhythm;
   state.palette = saved.palette ?? state.palette;
   reharmonize();
@@ -361,11 +401,33 @@ function loadTake(take, saved = {}) {
   take.dirty = false;
 }
 
+// The notes the harmony is built from: the (trimmed) take plus any layers the user opted in.
+function analysisNotes() {
+  const { notes, layers, trim } = state.take;
+  const extra = layers
+    .filter((l) => l.included)
+    .flatMap((l) => l.notes.filter((n) => n.start >= trim.start - 0.05 && n.end <= trim.end + 0.05));
+  return [...notes, ...extra].sort((a, b) => a.start - b.start);
+}
+
+function markDirty() {
+  if (state.take?.id) state.take.dirty = true;
+}
+
 function reharmonize() {
   if (!state.take) return;
   state.overrides = {};
-  state.harmony = harmonize(state.take.notes, state.keys[state.keyIdx], { rhythm: state.rhythm, palette: state.palette });
-  if (state.take.id) state.take.dirty = true;
+  state.harmony = harmonize(analysisNotes(), state.keys[state.keyIdx], { rhythm: state.rhythm, palette: state.palette });
+  markDirty();
+}
+
+// Full re-analysis after the material changed (trim, layer opted in or out).
+function reanalyze() {
+  stopPlayback();
+  state.keys = detectKeys(analysisNotes());
+  state.keyIdx = 0;
+  reharmonize();
+  renderHarmony();
 }
 
 function resolvedSegments() {
@@ -374,8 +436,10 @@ function resolvedSegments() {
 }
 
 function takeRange() {
-  const n = state.take.notes;
-  return { start: Math.max(0, n[0].start - 0.15), end: Math.min(state.take.duration, n[n.length - 1].end + 0.3) };
+  const n = analysisNotes();
+  const { trim } = state.take;
+  const last = n.reduce((m, x) => Math.max(m, x.end), 0);
+  return { start: Math.max(trim.start, n[0].start - 0.15), end: Math.min(trim.end, last + 0.3) };
 }
 
 /* ---------- harmony view ---------- */
@@ -389,11 +453,26 @@ function renderHarmony() {
   const take = state.take;
   const key = state.keys[state.keyIdx];
   const segs = resolvedSegments();
+  const trimming = !!state.trimming;
+
+  $('#harmonyContent').classList.toggle('trimming', trimming);
+  $('#rollCanvas').classList.toggle('trim', trimming);
+  $('#rollBar').hidden = trimming;
+  $('#trimBar').hidden = !trimming;
 
   $('#takeName').textContent = take.name;
   $('#keyTitle').textContent = keyName(key);
   const { start, end } = takeRange();
-  $('#keyMeta').textContent = `${Math.round(key.p * 100)}% likely · ${take.notes.length} notes · ${fmtTime(end - start)}`;
+  const included = take.layers.filter((l) => l.included).length;
+  $('#keyMeta').textContent =
+    `${Math.round(key.p * 100)}% likely · ${take.notes.length} notes · ${fmtTime(end - start)}` +
+    (included ? ` · +${included} layer${included > 1 ? 's' : ''}` : '');
+
+  const trimmed = take.trim.start > 0.05 || take.trim.end < take.duration - 0.05;
+  $('#rollInfo').textContent = trimmed
+    ? `Trimmed to ${fmtTime(take.trim.start)}–${fmtTime(take.trim.end)}`
+    : `${fmtTime(take.duration)} recording`;
+  $('#layerCount').textContent = take.layers.length || '';
 
   $('#keyChips').innerHTML = state.keys
     .slice(0, 6)
@@ -420,9 +499,20 @@ function renderHarmony() {
   const off = take.offset;
   $('#tuningHint').textContent = Math.abs(off) < 8 ? 'You sang right in tune' : `You sang ${Math.abs(off)}¢ ${off > 0 ? 'sharp' : 'flat'} of A440`;
 
+  updateTransportStatus();
   $('#saveBtn').classList.toggle('saved', !!take.id && !take.dirty);
   drawRoll();
 }
+
+function updateTransportStatus(text) {
+  const el = $('#transportStatus');
+  const msg = text ?? (state.trimming ? 'Play previews your selection' : '');
+  el.hidden = !msg;
+  $('#transportStatusText').textContent = msg;
+  document.querySelector('.mode-seg').hidden = !!msg;
+}
+
+let rollGeom = null;
 
 function drawRoll(playT = null) {
   if (!state.take || state.view !== 'harmony') return;
@@ -430,23 +520,30 @@ function drawRoll(playT = null) {
   const { g, w, h } = fitCanvas(cv);
   const take = state.take;
   const key = state.keys[state.keyIdx];
-  const segs = resolvedSegments();
-  const { start, end } = takeRange();
+  const trimming = state.trimming;
+  const { start, end } = trimming ? { start: 0, end: take.duration } : takeRange();
+  const inView = (n) => n.end > start && n.start < end;
 
+  const groups = [
+    { notes: take.notes, style: 'base' },
+    ...take.layers.map((l) => ({ notes: l.notes, style: l.included ? 'layer' : 'ghost' })),
+  ];
   let lo = Infinity, hi = -Infinity;
-  for (const n of take.notes) { lo = Math.min(lo, n.midi); hi = Math.max(hi, n.midi); }
+  for (const grp of groups) for (const n of grp.notes) if (inView(n)) { lo = Math.min(lo, n.midi); hi = Math.max(hi, n.midi); }
+  if (!Number.isFinite(lo)) { lo = 55; hi = 67; }
   lo -= 2; hi += 2;
   while (hi - lo < 12) { lo--; if (hi - lo < 12) hi++; }
 
-  const left = 30, right = 8, top = 8, band = 34;
+  const left = 30, right = 8, top = 8, band = trimming ? 18 : 34;
   const rollH = h - top - band - 10;
   const laneH = rollH / (hi - lo + 1);
   const x = (t) => left + ((t - start) / (end - start)) * (w - left - right);
   const laneY = (m) => top + (hi - m) * laneH;
   const scale = scalePcs(key);
+  rollGeom = { x0: left, x1: w - right, start, end };
 
   const cLane = token('--lane'), cTonic = token('--lane-tonic'), cFaint = token('--faint');
-  const cGold = token('--gold'), cViolet = token('--violet'), cSurface2 = token('--surface-2');
+  const cGold = token('--gold'), cViolet = token('--violet'), cSurface = token('--surface'), cSurface2 = token('--surface-2');
   const cText = token('--text'), cInk = token('--gold-ink');
 
   g.font = '10px ' + token('--font');
@@ -461,13 +558,20 @@ function drawRoll(playT = null) {
     }
   }
 
-  // Chord boundaries
-  g.fillStyle = cLane;
-  for (const s of segs.slice(1)) g.fillRect(Math.round(x(s.start)), top, 1, rollH);
+  const segs = resolvedSegments();
+  if (!trimming) {
+    g.fillStyle = cLane;
+    for (const s of segs.slice(1)) g.fillRect(Math.round(x(s.start)), top, 1, rollH);
+  }
 
-  // Raw pitch trace
+  g.save();
+  g.beginPath();
+  g.rect(left, 0, w - left - right, h);
+  g.clip();
+
+  // Raw pitch trace of the original take
   g.strokeStyle = cViolet;
-  g.globalAlpha = 0.55;
+  g.globalAlpha = trimming ? 0.8 : 0.55;
   g.lineWidth = 1.5;
   g.beginPath();
   let pen = false;
@@ -482,31 +586,63 @@ function drawRoll(playT = null) {
   g.stroke();
   g.globalAlpha = 1;
 
-  // Quantized notes
-  for (const n of take.notes) {
-    const active = playT != null && playT >= n.start && playT < n.end;
-    g.fillStyle = cGold;
-    g.globalAlpha = playT == null || active ? 1 : 0.55;
-    roundRect(g, x(n.start), laneY(n.midi) + 1, Math.max(3, x(n.end) - x(n.start) - 1.5), Math.max(3, laneH - 2), 3);
-    g.fill();
+  // Notes: original in gold, layers in the harmony in violet, other layers as outlines
+  for (const grp of [...groups].reverse()) {
+    for (const n of grp.notes) {
+      if (!inView(n)) continue;
+      const active = playT != null && playT >= n.start && playT < n.end;
+      const nx = x(n.start), nw = Math.max(3, x(n.end) - x(n.start) - 1.5);
+      roundRect(g, nx, laneY(n.midi) + 1, nw, Math.max(3, laneH - 2), 3);
+      if (grp.style === 'ghost') {
+        g.strokeStyle = cFaint;
+        g.lineWidth = 1;
+        g.stroke();
+        continue;
+      }
+      g.fillStyle = grp.style === 'base' ? cGold : cViolet;
+      g.globalAlpha = playT == null || active ? 1 : 0.55;
+      g.fill();
+      g.globalAlpha = 1;
+    }
   }
-  g.globalAlpha = 1;
+  g.restore();
 
-  // Chord band
-  const by = h - band - 4;
-  g.font = '600 12px ' + token('--font');
-  g.textAlign = 'center';
-  for (const s of segs) {
-    const active = playT != null && playT >= s.start && playT < s.end;
-    const sx = x(s.start) + 1, sw = x(s.end) - x(s.start) - 2;
-    g.fillStyle = active ? cGold : cSurface2;
-    roundRect(g, sx, by, sw, band, 8);
-    g.fill();
-    const label = g.measureText(s.chord.symbol).width < sw - 6 ? s.chord.symbol : sw > 14 ? s.chord.symbol[0] : '';
-    g.fillStyle = active ? cInk : cText;
-    g.fillText(label, sx + sw / 2, by + band / 2);
+  if (trimming) {
+    const a = x(trimming.start), b = x(trimming.end);
+    g.fillStyle = cSurface;
+    g.globalAlpha = 0.72;
+    g.fillRect(left, top, a - left, h - top);
+    g.fillRect(b, top, w - right - b, h - top);
+    g.globalAlpha = 1;
+    g.fillStyle = cGold;
+    for (const hx of [a, b]) {
+      g.fillRect(hx - 1.5, top, 3, rollH);
+      roundRect(g, hx - 5, top + rollH / 2 - 16, 10, 32, 5);
+      g.fill();
+    }
+    g.font = '600 11px ' + token('--font');
+    g.textBaseline = 'middle';
+    g.textAlign = 'left';
+    g.fillText(fmtPrecise(trimming.start), Math.min(a + 4, w - right - 90), h - band / 2 - 2);
+    g.textAlign = 'right';
+    g.fillText(fmtPrecise(trimming.end), Math.max(b - 4, left + 90), h - band / 2 - 2);
+    g.textAlign = 'left';
+  } else {
+    const by = h - band - 4;
+    g.font = '600 12px ' + token('--font');
+    g.textAlign = 'center';
+    for (const s of segs) {
+      const active = playT != null && playT >= s.start && playT < s.end;
+      const sx = x(s.start) + 1, sw = x(s.end) - x(s.start) - 2;
+      g.fillStyle = active ? cGold : cSurface2;
+      roundRect(g, sx, by, sw, band, 8);
+      g.fill();
+      const label = g.measureText(s.chord.symbol).width < sw - 6 ? s.chord.symbol : sw > 14 ? s.chord.symbol[0] : '';
+      g.fillStyle = active ? cInk : cText;
+      g.fillText(label, sx + sw / 2, by + band / 2);
+    }
+    g.textAlign = 'left';
   }
-  g.textAlign = 'left';
 
   if (playT != null) {
     g.fillStyle = cText;
@@ -551,27 +687,115 @@ $('#chordList').addEventListener('click', (e) => {
   if (b) openChordSheet(+b.dataset.i);
 });
 
+/* ---------- trim ---------- */
+
+$('#trimBtn').addEventListener('click', () => {
+  stopPlayback();
+  state.trimming = { ...state.take.trim, drag: null };
+  renderHarmony();
+  haptic();
+});
+
+$('#trimCancel').addEventListener('click', () => {
+  stopPlayback();
+  state.trimming = null;
+  renderHarmony();
+});
+
+$('#trimApply').addEventListener('click', async () => {
+  const take = state.take;
+  const { start, end } = state.trimming;
+  stopPlayback();
+  if (!take.track) {
+    setProcessing(true, 0.1);
+    await nextFrame();
+    take.track = await extractTrack(take.samples, take.sampleRate, (p) => setProcessing(true, 0.1 + p * 0.85));
+    setProcessing(false);
+  }
+  const frames = take.track.frames.filter((f) => f.t >= start && f.t <= end);
+  const r = segmentNotes({ frames, hop: take.track.hop });
+  if (r.notes.length < 3) {
+    toast('Not enough melody in that selection. Try a wider trim.');
+    return;
+  }
+  take.notes = r.notes;
+  take.offset = r.offset;
+  take.trim = { start, end };
+  state.trimming = null;
+  reanalyze();
+  toast('Trimmed and re-harmonized');
+  haptic(12);
+});
+
+function trimTimeAt(clientX) {
+  const r = $('#rollCanvas').getBoundingClientRect();
+  const { x0, x1, start, end } = rollGeom;
+  const t = start + ((clientX - r.left - x0) / (x1 - x0)) * (end - start);
+  return Math.max(0, Math.min(state.take.duration, t));
+}
+
+const roll = $('#rollCanvas');
+roll.addEventListener('pointerdown', (e) => {
+  const tr = state.trimming;
+  if (!tr || !rollGeom) return;
+  const t = trimTimeAt(e.clientX);
+  tr.drag = Math.abs(t - tr.start) <= Math.abs(t - tr.end) ? 'start' : 'end';
+  roll.setPointerCapture(e.pointerId);
+  moveTrimHandle(t);
+});
+roll.addEventListener('pointermove', (e) => {
+  if (state.trimming?.drag) moveTrimHandle(trimTimeAt(e.clientX));
+});
+['pointerup', 'pointercancel'].forEach((ev) => roll.addEventListener(ev, () => { if (state.trimming) state.trimming.drag = null; }));
+
+function moveTrimHandle(t) {
+  const tr = state.trimming;
+  if (tr.drag === 'start') tr.start = Math.min(t, tr.end - MIN_TRIM);
+  else tr.end = Math.max(t, tr.start + MIN_TRIM);
+  tr.start = Math.max(0, tr.start);
+  tr.end = Math.min(state.take.duration, tr.end);
+  drawRoll();
+}
+
 /* ---------- playback ---------- */
 
-function voiceBuffer() {
-  const take = state.take;
-  if (!take.buffer) {
-    take.buffer = synth.ensure().createBuffer(1, take.samples.length, take.sampleRate);
-    take.buffer.getChannelData(0).set(take.samples);
+function bufferFor(clip) {
+  if (!clip.buffer) {
+    clip.buffer = synth.ensure().createBuffer(1, clip.samples.length, clip.sampleRate);
+    clip.buffer.getChannelData(0).set(clip.samples);
   }
-  return take.buffer;
+  return clip.buffer;
+}
+
+// Plays the part of a clip (placed at clipStart on the take timeline) that falls in [start, end].
+function scheduleClip(clip, clipStart, t0, start, end) {
+  const buf = bufferFor(clip);
+  const a = Math.max(start, clipStart);
+  const b = Math.min(end, clipStart + buf.duration);
+  if (b > a) synth.voice(buf, t0 + (a - start), a - clipStart, b - a);
 }
 
 function startPlayback() {
   if (!state.take) return;
   stopPlayback();
+  const take = state.take;
   const ctx = synth.begin();
-  const { start, end } = takeRange();
-  const t0 = ctx.currentTime + 0.08;
-  const level = state.mode === 'chords' ? 1 : 0.7;
-  for (const s of resolvedSegments()) synth.chord(voicing(s.chord), t0 + s.start - start, s.end - s.start, level);
-  if (state.mode === 'voice') synth.voice(voiceBuffer(), t0, start, end - start);
-  if (state.mode === 'melody') for (const n of state.take.notes) synth.lead(n.midi, t0 + n.start - start, n.end - n.start);
+  const { start, end } = state.trimming ?? takeRange();
+  const t0 = ctx.currentTime + 0.1;
+
+  if (state.trimming) {
+    scheduleClip(take, 0, t0, start, end);
+  } else {
+    const level = state.mode === 'chords' ? 1 : 0.7;
+    for (const s of resolvedSegments()) synth.chord(voicing(s.chord), t0 + s.start - start, s.end - s.start, level);
+    if (state.mode === 'voice') {
+      scheduleClip(take, 0, t0, start, end);
+      for (const l of take.layers) if (!l.muted) scheduleClip(l, l.offset, t0, start, end);
+    }
+    if (state.mode === 'melody') {
+      for (const n of analysisNotes()) if (n.start >= start && n.start < end) synth.lead(n.midi, t0 + n.start - start, n.end - n.start);
+    }
+  }
   state.playing = { t0, start, end, raf: 0, seg: -1 };
   $('#playBtn').classList.add('playing');
   $('#playBtn').setAttribute('aria-label', 'Stop');
@@ -582,13 +806,19 @@ function tick() {
   const p = state.playing;
   if (!p) return;
   const t = p.start + (synth.ctx.currentTime - p.t0);
-  if (t >= p.end + 0.6) { stopPlayback(); return; }
+  if (t >= p.end + 0.6) {
+    if (layerRec) stopLayer();
+    else stopPlayback();
+    return;
+  }
   drawRoll(Math.max(p.start, Math.min(t, p.end)));
-  const segs = resolvedSegments();
-  const idx = segs.findIndex((s) => t >= s.start && t < s.end);
-  if (idx !== p.seg) {
-    p.seg = idx;
-    document.querySelectorAll('.chord-card').forEach((c, i) => c.classList.toggle('now', i === idx));
+  if (layerRec) updateTransportStatus(`Recording ${layerRec.name} · ${fmtTime(Math.max(0, t - p.start))}`);
+  if (!state.trimming) {
+    const idx = resolvedSegments().findIndex((s) => t >= s.start && t < s.end);
+    if (idx !== p.seg) {
+      p.seg = idx;
+      document.querySelectorAll('.chord-card').forEach((c, i) => c.classList.toggle('now', i === idx));
+    }
   }
   p.raf = requestAnimationFrame(tick);
 }
@@ -610,18 +840,204 @@ function audition(chord) {
   synth.chord(voicing(chord), ctx.currentTime + 0.02, 1.3, 0.9);
 }
 
-$('#playBtn').addEventListener('click', () => (state.playing ? stopPlayback() : startPlayback()));
+$('#playBtn').addEventListener('click', () => {
+  if (layerRec) stopLayer();
+  else if (state.playing) stopPlayback();
+  else startPlayback();
+});
+
+/* ---------- layers ---------- */
+
+let layerRec = null;
+
+async function startLayer() {
+  const take = state.take;
+  closeSheet();
+  stopPlayback();
+  synth.stopTone();
+  const used = take.layers.map((l) => +(l.name.match(/\d+/) || [0])[0]);
+  const name = `Layer ${Math.max(0, ...used) + 1}`;
+  let mic;
+  try {
+    mic = await openMic((data, time) => {
+      if (!layerRec) return;
+      layerRec.firstTime ??= time;
+      layerRec.chunks.push(data);
+      layerRec.length += data.length;
+    });
+  } catch (e) {
+    toast(e.message);
+    return;
+  }
+  layerRec = { mic, name, chunks: [], length: 0, firstTime: null };
+  document.body.classList.add('layering');
+  startPlayback();
+  layerRec.play = state.playing;
+  updateTransportStatus(`Recording ${name}`);
+  haptic(15);
+}
+
+async function stopLayer() {
+  const r = layerRec;
+  if (!r) return;
+  layerRec = null;
+  r.mic.close();
+  document.body.classList.remove('layering');
+  const ctx = synth.ctx;
+  const outLatency = ctx.outputLatency || ctx.baseLatency || 0;
+  stopPlayback();
+  updateTransportStatus();
+
+  if (r.length < r.mic.sr * 0.5 || r.firstTime == null) {
+    toast('That layer was too short to keep.');
+    return;
+  }
+  const samples = normalize(concat(r.chunks, r.length));
+  // Where the first recorded sample sits on the take's timeline, minus the
+  // round trip from speaker to ear to mic.
+  const offset = r.play.start + (r.firstTime - r.play.t0) - outLatency - r.mic.latency;
+
+  setProcessing(true, 0.1);
+  await nextFrame();
+  const track = await extractTrack(samples, r.mic.sr, (p) => setProcessing(true, 0.1 + p * 0.85));
+  const seg = segmentNotes(track);
+  setProcessing(false);
+
+  state.take.layers.push({
+    id: uid(),
+    name: r.name,
+    samples,
+    sampleRate: r.mic.sr,
+    duration: samples.length / r.mic.sr,
+    offset,
+    notes: seg.notes.map((n) => ({ ...n, start: n.start + offset, end: n.end + offset })),
+    muted: false,
+    included: false,
+  });
+  markDirty();
+  renderHarmony();
+  toast(`${r.name} added. Turn on Harmony in Layers to include it.`, 4200);
+  haptic([8, 40, 8]);
+}
+
+$('#layersBtn').addEventListener('click', openLayersSheet);
+
+function openLayersSheet() {
+  const take = state.take;
+  const check = '<span class="chk"></span>';
+  const rows = take.layers
+    .map((l) => `
+      <div class="layer-row" data-id="${l.id}">
+        <div class="layer-top">
+          <div class="layer-name"><b>${esc(l.name)}</b><span>${l.notes.length} notes · ${fmtTime(l.duration)}</span></div>
+          <button class="icon-sm" data-act="delete" aria-label="Delete ${esc(l.name)}">${trashIcon}</button>
+        </div>
+        <div class="layer-toggles">
+          <button class="pill ${l.muted ? '' : 'on'}" data-act="mute" aria-pressed="${!l.muted}">${check}Play</button>
+          <button class="pill ${l.included ? 'on' : ''}" data-act="include" aria-pressed="${l.included}">${check}Harmony</button>
+        </div>
+      </div>`)
+    .join('');
+  const full = take.layers.length >= MAX_LAYERS;
+
+  openSheet(`
+    <h3>Layers</h3>
+    <p class="sub">Sing more parts over your take, ideally with headphones so the playback stays out of the mic. A new layer only changes the key and chords once you turn on <b>Harmony</b>.</p>
+    <div class="layer-list">${rows || '<div class="layer-empty">No layers yet</div>'}</div>
+    <button class="btn primary block" id="layerRecord" ${full ? 'disabled' : ''}><span class="dot"></span>${full ? 'Layer limit reached' : 'Record a layer'}</button>`);
+
+  $('#layerRecord').addEventListener('click', startLayer);
+  $('#sheetBody .layer-list').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    const id = b.closest('.layer-row').dataset.id;
+    const layer = take.layers.find((l) => l.id === id);
+    if (b.dataset.act === 'mute') {
+      layer.muted = !layer.muted;
+      markDirty();
+    } else if (b.dataset.act === 'include') {
+      if (!layer.included && !layer.notes.length) {
+        toast(`No clear notes in ${layer.name} to harmonize.`);
+        return;
+      }
+      layer.included = !layer.included;
+      reanalyze();
+      toast(`Harmony updated ${layer.included ? 'with' : 'without'} ${layer.name}`);
+    } else if (b.dataset.act === 'delete') {
+      if (!b.classList.contains('confirm')) {
+        b.classList.add('confirm');
+        b.textContent = 'Delete';
+        return;
+      }
+      take.layers = take.layers.filter((l) => l !== layer);
+      markDirty();
+      if (layer.included) reanalyze();
+      else renderHarmony();
+    }
+    haptic();
+    openLayersSheet();
+  });
+}
+
+/* ---------- reference tone ---------- */
+
+$('#toneBtn').addEventListener('click', openToneSheet);
+
+function openToneSheet() {
+  const key = state.take ? state.keys[state.keyIdx] : null;
+  if (state.toneOctave == null) {
+    const notes = state.take?.notes ?? [];
+    const mid = notes.length ? notes.map((n) => n.midi).sort((a, b) => a - b)[notes.length >> 1] : 60;
+    state.toneOctave = Math.max(3, Math.min(5, Math.floor(mid / 12) - 1));
+  }
+  const black = [1, 3, 6, 8, 10];
+  const keys = Array.from({ length: 12 }, (_, p) =>
+    `<button class="tone-key ${black.includes(p) ? 'sharp' : ''} ${key && p === key.tonic ? 'tonic' : ''}" data-pc="${p}">${spell(p, key)}</button>`
+  ).join('');
+
+  openSheet(`
+    <h3>Reference tone</h3>
+    <p class="sub">Tap a note to hear it, then hum to match.</p>
+    <div class="tone-grid" role="group" aria-label="Notes">${keys}</div>
+    <div class="seg tone-oct" role="group" aria-label="Octave">
+      ${[3, 4, 5].map((o) => `<button data-oct="${o}" class="${o === state.toneOctave ? 'active' : ''}">${['Low', 'Middle', 'High'][o - 3]}</button>`).join('')}
+    </div>
+    ${key ? `<p class="tone-legend">The dot marks ${spell(key.tonic, key)}, the home note of ${keyName(key)}.</p>` : ''}`);
+
+  const body = $('#sheetBody');
+  const play = (b) => {
+    synth.tone((state.toneOctave + 1) * 12 + +b.dataset.pc, 3, () => b.classList.remove('playing'));
+    b.classList.add('playing');
+  };
+  body.querySelector('.tone-grid').addEventListener('click', (e) => {
+    const b = e.target.closest('.tone-key');
+    if (!b) return;
+    if (b.classList.contains('playing')) synth.stopTone();
+    else play(b);
+    haptic();
+  });
+  body.querySelector('.tone-oct').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    state.toneOctave = +b.dataset.oct;
+    body.querySelectorAll('.tone-oct button').forEach((x) => x.classList.toggle('active', x === b));
+    const playing = body.querySelector('.tone-key.playing');
+    if (playing) play(playing);
+  });
+}
 
 /* ---------- sheets ---------- */
 
 function openSheet(html) {
   $('#sheetBody').innerHTML = html;
+  document.body.classList.add('sheet-open');
   $('#sheet').classList.add('show');
   $('#sheet').setAttribute('aria-hidden', 'false');
   $('#sheetBackdrop').classList.add('show');
 }
 
 function closeSheet() {
+  document.body.classList.remove('sheet-open');
   $('#sheet').classList.remove('show');
   $('#sheet').setAttribute('aria-hidden', 'true');
   $('#sheetBackdrop').classList.remove('show');
@@ -657,7 +1073,7 @@ function openChordSheet(i) {
     const id = +b.dataset.id;
     if (id === seg.chord.id) delete state.overrides[i];
     else state.overrides[i] = id;
-    if (state.take.id) state.take.dirty = true;
+    markDirty();
     document.querySelectorAll('#sheetBody .alt').forEach((x) => x.classList.toggle('active', x === b));
     audition(state.harmony.vocab[id]);
     renderHarmony();
@@ -682,8 +1098,9 @@ $('#saveBtn').addEventListener('click', () => {
 async function saveTake(name) {
   const take = state.take;
   take.name = name || take.name;
-  take.id ??= crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  take.id ??= uid();
   const key = state.keys[state.keyIdx];
+  const range = takeRange();
   const meta = {
     id: take.id,
     name: take.name,
@@ -695,14 +1112,17 @@ async function saveTake(name) {
     trace: take.trace,
     traceT0: take.traceT0,
     hop: take.hop,
+    trim: take.trim,
+    layers: take.layers.map(({ samples, buffer, ...rest }) => rest),
     keyIdx: state.keyIdx,
     rhythm: state.rhythm,
     palette: state.palette,
     overrides: state.overrides,
-    summary: { key: keyName(key), chords: resolvedSegments().map((s) => s.chord.symbol), length: takeRange().end - takeRange().start },
+    summary: { key: keyName(key), chords: resolvedSegments().map((s) => s.chord.symbol), length: range.end - range.start },
   };
+  const audio = { base: take.samples, layers: Object.fromEntries(take.layers.map((l) => [l.id, l.samples])) };
   try {
-    await store.save(meta, take.samples);
+    await store.save(meta, audio);
     take.dirty = false;
     closeSheet();
     renderHarmony();
@@ -744,17 +1164,19 @@ async function renderLibrary() {
   try { items = await store.list(); } catch { /* storage unavailable */ }
   items.sort((a, b) => b.created - a.created);
   $('#libEmpty').hidden = items.length > 0;
-  const trash = '<svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   $('#libList').innerHTML = items
-    .map((it) => `
+    .map((it) => {
+      const layers = it.layers?.length ?? 0;
+      return `
       <li class="lib-item">
         <button class="lib-open" data-id="${esc(it.id)}">
           <span class="lib-title">${esc(it.name)}</span>
-          <span class="lib-meta"><b>${esc(it.summary.key)}</b> · ${fmtTime(it.summary.length ?? it.duration)} · ${new Date(it.created).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
+          <span class="lib-meta"><b>${esc(it.summary.key)}</b> · ${fmtTime(it.summary.length ?? it.duration)}${layers ? ` · ${layers} layer${layers > 1 ? 's' : ''}` : ''} · ${new Date(it.created).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
           <span class="lib-chords">${it.summary.chords.slice(0, 8).map((c) => `<span>${esc(c)}</span>`).join('')}${it.summary.chords.length > 8 ? '<span>…</span>' : ''}</span>
         </button>
-        <button class="lib-del" data-del="${esc(it.id)}" aria-label="Delete ${esc(it.name)}">${trash}</button>
-      </li>`)
+        <button class="lib-del" data-del="${esc(it.id)}" aria-label="Delete ${esc(it.name)}">${trashIcon}</button>
+      </li>`;
+    })
     .join('');
 }
 
@@ -775,8 +1197,11 @@ $('#libList').addEventListener('click', async (e) => {
   const open = e.target.closest('.lib-open');
   if (!open) return;
   try {
-    const { meta, samples } = await store.load(open.dataset.id);
-    loadTake({ ...meta, samples, dirty: false }, meta);
+    const { meta, samples: raw } = await store.load(open.dataset.id);
+    // Early saves stored the take's samples directly; newer ones store base + layers.
+    const audio = raw instanceof Float32Array ? { base: raw, layers: {} } : raw;
+    const layers = (meta.layers ?? []).map((l) => ({ ...l, samples: audio.layers?.[l.id] })).filter((l) => l.samples);
+    loadTake({ ...meta, samples: audio.base, layers }, meta);
     showView('harmony');
   } catch {
     toast("Couldn't open that take.");
@@ -796,10 +1221,11 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', (
 });
 
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) {
-    stopPlayback();
-    if (rec) stopRecording();
-  }
+  if (!document.hidden) return;
+  synth.stopTone();
+  if (layerRec) stopLayer();
+  else stopPlayback();
+  if (rec) stopRecording();
 });
 
 resetLive();

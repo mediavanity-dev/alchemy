@@ -116,6 +116,49 @@ export class Synth {
     this._track(osc);
   }
 
+  // Clean reference pitch, independent of playback so it never cuts a take off.
+  tone(midi, dur = 3, onEnd) {
+    const ctx = this.ensure();
+    this.stopTone();
+    const t = ctx.currentTime + 0.01;
+    const env = ctx.createGain();
+    env.connect(this.master);
+    env.gain.setValueAtTime(0, t);
+    env.gain.linearRampToValueAtTime(0.28, t + 0.04);
+    env.gain.setValueAtTime(0.28, t + dur - 0.7);
+    env.gain.linearRampToValueAtTime(0, t + dur);
+    const oscs = [[1, 1], [2, 0.12], [3, 0.04]].map(([h, g]) => {
+      const osc = ctx.createOscillator();
+      const og = ctx.createGain();
+      osc.frequency.value = midiToFreq(midi) * h;
+      og.gain.value = g;
+      osc.connect(og).connect(env);
+      osc.start(t);
+      osc.stop(t + dur + 0.05);
+      return osc;
+    });
+    const nodes = { env, oscs, onEnd };
+    oscs[0].onended = () => {
+      if (this.toneNodes !== nodes) return;
+      this.toneNodes = null;
+      onEnd?.();
+    };
+    this.toneNodes = nodes;
+  }
+
+  stopTone() {
+    const n = this.toneNodes;
+    if (!n) return;
+    this.toneNodes = null;
+    n.onEnd?.();
+    const now = this.ctx.currentTime;
+    n.env.gain.cancelScheduledValues(now);
+    n.env.gain.setTargetAtTime(0, now, 0.03);
+    for (const o of n.oscs) {
+      try { o.stop(now + 0.2); } catch { /* already stopped */ }
+    }
+  }
+
   voice(buffer, t, offset, dur) {
     const src = this.ctx.createBufferSource();
     src.buffer = buffer;

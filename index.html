@@ -23,7 +23,9 @@
         <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 5 L28 26 H4 Z" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"/><path d="M10.5 19.5 q1.4 -2.4 2.8 0 t2.8 0 t2.8 0 t2.8 0" fill="none" stroke="var(--violet)" stroke-width="2" stroke-linecap="round"/></svg>
         <span>Alchemy</span>
       </div>
-      <span class="topbar-sub">hum → harmony</span>
+      <button class="tone-btn" id="toneBtn" aria-label="Reference tone">
+        <svg viewBox="0 0 24 24"><path d="M9 3v7a3 3 0 0 0 6 0V3M12 13v8M9 21h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
     </header>
 
     <main>
@@ -81,6 +83,27 @@
 
           <canvas id="rollCanvas" class="roll" aria-label="Melody and chords"></canvas>
 
+          <div class="roll-bar" id="rollBar">
+            <span class="roll-info" id="rollInfo"></span>
+            <div class="roll-actions">
+              <button class="text-btn" id="trimBtn">
+                <svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="6" cy="18" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8.5 7.5 20 18M8.5 16.5 20 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                Trim
+              </button>
+              <button class="text-btn" id="layersBtn">
+                <svg viewBox="0 0 24 24"><path d="m12 4 9 5-9 5-9-5z M3 14l9 5 9-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+                Layers<span class="badge" id="layerCount"></span>
+              </button>
+            </div>
+          </div>
+          <div class="roll-bar" id="trimBar" hidden>
+            <span class="roll-info">Drag the edges to trim</span>
+            <div class="roll-actions">
+              <button class="text-btn" id="trimCancel">Cancel</button>
+              <button class="text-btn strong" id="trimApply">Apply</button>
+            </div>
+          </div>
+
           <div class="controls">
             <div class="control">
               <span class="label">Chord changes</span>
@@ -106,6 +129,7 @@
             <div class="seg mode-seg" data-setting="mode">
               <button data-value="voice">Voice + chords</button><button data-value="melody">Melody + chords</button><button data-value="chords">Chords</button>
             </div>
+            <div class="transport-status" id="transportStatus" hidden><span class="rec-dot"></span><span id="transportStatusText"></span></div>
             <div class="transport-row">
               <button class="icon-btn" id="saveBtn" aria-label="Save to library">
                 <svg viewBox="0 0 24 24"><path d="M6 3h12v18l-6-4-6 4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
