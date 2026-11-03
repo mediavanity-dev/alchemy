@@ -57,11 +57,18 @@ const VOCAB = {
   ],
 };
 
-// Chord length, in multiples of the singer's typical note spacing.
-const RHYTHM = { slow: 6, medium: 4, fast: 2 };
-// With a beat grid: beats per chord at "fast" for each bar length (half bars, odd meters split long-short).
-const FAST_GROUPS = { 2: [1, 1], 3: [2, 1], 4: [2, 2], 5: [3, 2], 6: [3, 3], 7: [4, 3] };
-const MIDBAR_HOLD = 0.3;
+// How often the chord can change ("harmonic rhythm"): every 2 bars, every bar,
+// every half bar or every beat. Older saves used slow / medium / fast.
+export const RATES = ['2bar', 'bar', 'half', 'beat'];
+const LEGACY_RATE = { slow: '2bar', medium: 'bar', fast: 'half' };
+export const rateOf = (r) => LEGACY_RATE[r] ?? (RATES.includes(r) ? r : 'bar');
+// Half bars for each bar length (odd meters split long-short)
+const HALF_GROUPS = { 2: [1, 1], 3: [2, 1], 4: [2, 2], 5: [3, 2], 6: [3, 3], 7: [4, 3] };
+// Without any beat grid: chord length in multiples of the typical note spacing.
+const NOTES_PER_CHORD = { '2bar': 8, bar: 4, half: 2, beat: 1 };
+// A change inside the bar has to be asked for a little by the notes: more on a
+// minor beat than at the half bar. Bar lines are free.
+const HOLD = { half: 0.12, beat: 0.25 };
 const COLOR_UNSUNG = 0.15;
 const PLAYED_WEIGHT = 1.5; // played chords outweigh what the melody alone suggests
 const PASS_WEIGHT = 0.35;
@@ -177,7 +184,7 @@ function makeWindows(notes, rhythm, [t0, t1], changes = []) {
   const med = iois.length ? iois[iois.length >> 1] : 0.5;
 
   const span = t1 - t0;
-  let W = Math.min(4.5, Math.max(0.35, med * RHYTHM[rhythm]));
+  let W = Math.min(6, Math.max(0.3, med * NOTES_PER_CHORD[rhythm]));
   const count = Math.max(1, Math.round(span / W));
   W = span / count;
 
@@ -206,32 +213,37 @@ function makeWindows(notes, rhythm, [t0, t1], changes = []) {
   return wins;
 }
 
-// With a known beat grid, chords change on bar lines: every two bars (slow), every
-// bar (medium) or every half bar (fast). A pickup before the first full chord, or a
-// sliver after the last, joins its neighbour.
+// On a beat grid the chord can change every two bars, every bar, every half bar or
+// every beat. Each window knows where it starts: on a bar line (0), at the half bar
+// (1) or on another beat (2). A pickup before the first full chord, or a sliver
+// after the last, joins its neighbour.
 function makeGridWindows(notes, rhythm, tempo, [t0, t1]) {
   const per = barBeats(tempo.meter);
-  const groups = rhythm === 'fast' ? FAST_GROUPS[per] ?? [per] : rhythm === 'slow' ? [per * 2] : [per];
+  const groups = rhythm === '2bar' ? [per * 2] : rhythm === 'half' ? HALF_GROUPS[per] ?? [per]
+    : rhythm === 'beat' ? Array(per).fill(1) : [per];
+  const half = (HALF_GROUPS[per] ?? [per])[0];
   const cycle = groups.reduce((a, b) => a + b, 0) * tempo.beat;
-  const minLen = groups[groups.length - 1] * tempo.beat * 0.5;
+  const minLen = Math.min(...groups) * tempo.beat * 0.5;
 
-  const bounds = [t0], weak = new Set();
+  const bounds = [t0], level = new Map();
   let c = tempo.downbeat + Math.floor((t0 - tempo.downbeat) / cycle) * cycle;
   for (; c < t1; c += cycle) {
-    let t = c;
-    groups.forEach((g, k) => {
+    let at = 0; // beats into the cycle
+    for (const g of groups) {
+      const t = c + at * tempo.beat;
       if (t > t0 + minLen && t < t1 - minLen) {
         bounds.push(t);
-        if (k > 0) weak.add(t);
+        const inBar = at % per;
+        level.set(t, inBar === 0 ? 0 : inBar === half ? 1 : 2);
       }
-      t += g * tempo.beat;
-    });
+      at += g;
+    }
   }
   bounds.push(t1);
 
   const wins = [];
   for (let i = 0; i < bounds.length - 1; i++) {
-    wins.push({ ...windowOver(notes, bounds[i], bounds[i + 1]), midBar: weak.has(bounds[i]) });
+    wins.push({ ...windowOver(notes, bounds[i], bounds[i + 1]), level: level.get(bounds[i]) ?? 0 });
   }
   return wins;
 }
@@ -355,7 +367,8 @@ function transition(a, b) {
 // notes sung over it, and the sequence should move like a real progression.
 // Pass `tempo` only when its beat grid can be trusted (a count-in, or set by hand).
 // `played`: chroma from instrument layers whose chords should guide the choice.
-export function harmonize(notes, key, { rhythm = 'medium', palette = 'triads', tempo = null, played = [] } = {}) {
+export function harmonize(notes, key, { rhythm: rate = 'bar', palette = 'triads', tempo = null, played = [] } = {}) {
+  const rhythm = rateOf(rate);
   const all = buildVocab(key);
   const vocab = choicesFor(all, palette);
   const scale = scalePcs(key);
@@ -382,8 +395,8 @@ export function harmonize(notes, key, { rhythm = 'medium', palette = 'triads', t
       for (let i = 0; i < N; i++) {
         let v = prev[i] + TW * transition(vocab[i], vocab[j]);
         if (empty && i === j) v += 0.6;
-        // Mid-bar changes need the notes to ask for them.
-        if (wins[t].midBar && i === j) v += MIDBAR_HOLD;
+        // Changes inside the bar need the notes to ask for them a little.
+        if (i === j && wins[t].level) v += wins[t].level === 1 ? HOLD.half : HOLD.beat;
         if (v > best) { best = v; bi = i; }
       }
       cur[j] = best + E[t][j];

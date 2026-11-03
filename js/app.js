@@ -1,5 +1,5 @@
 import { extractTrack, segmentNotes, livePitch, normalizeLoudness } from './pitch.js';
-import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing, detectTempo, beatsBetween, rankChords, METERS, barBeats } from './theory.js';
+import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing, detectTempo, beatsBetween, rankChords, METERS, barBeats, rateOf } from './theory.js';
 import { Synth } from './synth.js';
 import { tuneClip, targetFn } from './tune.js';
 import { analyze, classify, chromaOf, hitsOf, normalizePeak } from './sound.js';
@@ -18,7 +18,7 @@ const state = {
   take: null,
   keys: [],
   keyIdx: 0,
-  rhythm: 'medium',
+  rhythm: 'bar',
   palette: 'triads',
   harmony: null,
   overrides: {},
@@ -633,7 +633,7 @@ function loadTake(take, saved = {}) {
   state.take = take;
   state.keys = detectKeys(analysisNotes(), playedSources());
   state.keyIdx = Math.min(saved.keyIdx ?? 0, state.keys.length - 1);
-  state.rhythm = saved.rhythm ?? state.rhythm;
+  state.rhythm = rateOf(saved.rhythm ?? state.rhythm);
   state.palette = { simple: 'triads', rich: 'chromatic' }[saved.palette] ?? saved.palette ?? state.palette;
   reharmonize();
   state.overrides = saved.overrides ?? {};
@@ -670,11 +670,17 @@ function markDirty() {
   if (state.take?.id) state.take.dirty = true;
 }
 
-// Chords follow the bar lines only when the beat grid can be trusted: a count-in,
-// or a tempo the user set. A detected tempo is a guess, so it isn't used.
+// Chord changes always follow bar lines ("chord every bar" and so on): the count-in's
+// tempo, one set by hand, or failing those the detected one, which the user can
+// correct from the tempo button.
 function harmonyOptions() {
+  return { rhythm: state.rhythm, palette: state.palette, tempo: state.take?.tempo ?? null, played: playedSources() };
+}
+
+// A beat grid the user has confirmed: their count-in, or a tempo they set.
+function trustedTempo() {
   const t = state.take?.tempo;
-  return { rhythm: state.rhythm, palette: state.palette, tempo: t && (t.source === 'countin' || t.manual) ? t : null, played: playedSources() };
+  return t && (t.source === 'countin' || t.manual) ? t : null;
 }
 
 function reharmonize() {
@@ -1408,7 +1414,7 @@ function startPlayback({ countIn = false } = {}) {
   } else {
     // A loop over a trusted beat grid is rounded out to whole bars, so the groove
     // carries straight on across the seam.
-    const grid = harmonyOptions().tempo;
+    const grid = trustedTempo();
     if (state.loop && (!layerRec || layerRec.loop) && grid) {
       const bar = barBeats(grid.meter) * grid.beat;
       start = grid.downbeat + Math.floor((start - grid.downbeat) / bar + 0.02) * bar;
@@ -1522,7 +1528,7 @@ $('#loopBtn').addEventListener('click', () => {
   setLoop(!state.loop);
   haptic();
   // With a beat grid the loop is rounded to whole bars, so restart on that span.
-  if (state.loop && state.playing && !layerRec && !state.trimming && harmonyOptions().tempo) startPlayback();
+  if (state.loop && state.playing && !layerRec && !state.trimming && trustedTempo()) startPlayback();
   toast(state.loop ? 'Loop on' : 'Loop off', 1200);
 });
 
@@ -1631,7 +1637,7 @@ async function stopLayer() {
   usePass(layer, pick);
   const take = state.take;
   take.layers.push(layer);
-  if (kind === 'rhythm' && take.tempo?.source !== 'countin' && !take.tempo?.manual) retempo();
+  if (kind === 'rhythm' && take.tempo?.source !== 'countin' && !take.tempo?.manual) { retempo(); regrid(); }
   markDirty();
   renderHarmony();
   toast(passes.length > 1
@@ -1881,7 +1887,7 @@ function openTracksSheet() {
       prepareLayer(layer);
       stopPlayback();
       markDirty();
-      if (prev === 'rhythm' || next === 'rhythm') retempo();
+      if (prev === 'rhythm' || next === 'rhythm') { retempo(); regrid(); }
       if (wasIncluded) reanalyze();
       else renderHarmony();
       toast(`${layer.name} treated as ${KINDS[next].toLowerCase()}${next === layer.kindAuto ? ', as first detected' : ''}.`);
@@ -2040,10 +2046,8 @@ function setMeter(meter) {
   take.tempo = { ...take.tempo, meter };
   markDirty();
   const wasPlaying = !!state.playing && !layerRec;
-  if (harmonyOptions().tempo) {
-    stopPlayback();
-    regrid();
-  }
+  stopPlayback();
+  regrid();
   renderHarmony();
   if (wasPlaying && state.metronome) startPlayback();
 }
@@ -2075,7 +2079,7 @@ function openTempoSheet() {
   }
   openSheet(`<div class="tempo-sheet">
     <h3>Metronome</h3>
-    <p class="sub">${t.manual ? 'Tempo set by you.' : `Estimated from your take${t.steady ? '' : ', which drifts a little, so it may need a nudge'}.`} It clicks only during playback and layer recording.</p>
+    <p class="sub">${t.manual ? 'Tempo set by you.' : `Estimated from your take${t.steady ? '' : ', which drifts a little, so it may need a nudge'}.`} Chord changes follow its bars, and it clicks only during playback and layer recording.</p>
     <div class="tempo-row">
       <button class="icon-btn" data-step="-1" aria-label="Slower">−</button>
       <div class="tempo-value">${Math.round(t.bpm)}<small>BPM</small></div>
