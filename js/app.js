@@ -2,7 +2,7 @@ import { extractTrack, segmentNotes, livePitch, normalizeLoudness } from './pitc
 import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing, detectTempo, beatsBetween, rankChords, METERS, barBeats } from './theory.js';
 import { Synth } from './synth.js';
 import { tuneClip, targetFn } from './tune.js';
-import { analyze, chromaOf, hitsOf, normalizePeak } from './sound.js';
+import { analyze, classify, chromaOf, hitsOf, normalizePeak } from './sound.js';
 import * as store from './db.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -565,17 +565,29 @@ $('#demoBtn').addEventListener('click', () => {
 async function processAudio(samples, sampleRate, name, tempo = null) {
   setProcessing(true, 0.05);
   await nextFrame();
+  const raw = samples.slice();
   normalizeLoudness(samples, sampleRate);
 
   const track = await extractTrack(samples, sampleRate, (p) => setProcessing(true, 0.05 + p * 0.85));
   const { notes, offset, trace, traceT0, hop } = segmentNotes(track);
+  // The main take is the tune everything is built on; beats and chords go on top as layers.
+  const { kind } = classify(raw, sampleRate, track);
   setProcessing(true, 1);
   await new Promise((r) => setTimeout(r, 250));
   setProcessing(false);
 
-  if (notes.length < 3) {
-    toast("I couldn't hear a clear melody. Try humming a little louder, one note at a time.");
+  if (kind === 'rhythm') {
+    toast('That sounded like rhythm. Hum or sing your tune here first, then add beats as a layer: Tracks, on the Harmony page.', 6500);
     return;
+  }
+  if (notes.length < 3) {
+    toast(kind === 'chords'
+      ? 'That sounded like chords. Hum or sing your tune here first, then add instruments as a layer: Tracks, on the Harmony page.'
+      : "I couldn't hear a clear melody. Try humming a little louder, one note at a time.", 6500);
+    return;
+  }
+  if (kind === 'chords') {
+    setTimeout(() => toast('That sounded like chords. It works best to sing the tune here and add instruments as a layer in Tracks.', 6000), 600);
   }
 
   const duration = samples.length / sampleRate;
@@ -2194,6 +2206,23 @@ resetLive();
 drawLive();
 if (location.hash === '#demo') $('#demoBtn').click();
 
+// Updates: check whenever the app comes back to the foreground (a home-screen app
+// can stay open for days), and switch to a new version as soon as that can't lose
+// anything: not mid-recording, and no unsaved take in hand.
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || ['localhost', '127.0.0.1'].includes(location.hostname))) {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  const hadController = !!navigator.serviceWorker.controller;
+  let updateReady = false;
+  const safeToReload = () => !rec && !layerRec && !starting && (!state.take || (state.take.id && !state.take.dirty));
+  const reloadIfSafe = () => { if (updateReady && safeToReload()) location.reload(); };
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((reg) => {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') reg.update().catch(() => {});
+      else reloadIfSafe();
+    });
+  }).catch(() => {});
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) return; // first install, already current
+    updateReady = true;
+    reloadIfSafe(); // otherwise next time the app goes to the background
+  });
 }
