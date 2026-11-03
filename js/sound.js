@@ -219,18 +219,31 @@ function texture(x, sr) {
 // - melody: one clear pitch at a time (voice, whistling, a single-note riff)
 // - chords: pitched but several notes at once (strummed guitar, piano chords)
 // - rhythm: mostly noise-like or struck (drums, taps, beatbox)
-export function classify(x, sr, track, hits = hitsOf(x, sr)) {
+export function classify(x, sr, track, hits = hitsOf(x, sr), chroma = chromaOf(x, sr)) {
   const rmsList = track.frames.map((f) => f.rms);
   const loud = percentile(rmsList, 0.95);
   const active = track.frames.filter((f) => f.rms > loud * 0.15);
-  const pitched = active.length ? active.filter((f) => f.midi != null && f.clarity >= 0.9).length / active.length : 0;
+  const clear = active.filter((f) => f.midi != null && f.clarity >= 0.9);
+  const pitched = active.length ? clear.length / active.length : 0;
+  // How many different notes the clear frames land on (a tune moves; a knock doesn't)
+  const bins = new Map();
+  for (const f of clear) bins.set(Math.round(f.midi), (bins.get(Math.round(f.midi)) ?? 0) + 1);
+  const notes = [...bins.values()].filter((n) => n >= clear.length * 0.04).length;
+  // How many notes sound at once: strong pitch classes per frame of the chroma
+  const counts = chroma.frames.filter((f) => f.some((v) => v > 0)).map((f) => f.filter((v) => v >= 0.45).length);
+  const poly = percentile(counts, 0.5);
   const { flatness, sustain } = texture(x, sr);
   const decay = decayOf(x, sr, hits);
-  const features = { pitched: +pitched.toFixed(2), flatness: +flatness.toFixed(3), sustain: +sustain.toFixed(2), decay: +decay.toFixed(2) };
+  const features = { pitched: +pitched.toFixed(2), notes, poly, flatness: +flatness.toFixed(3), sustain: +sustain.toFixed(2), decay: +decay.toFixed(2) };
+  const tonal = flatness < 0.1;
   let kind;
+  // A struck instrument playing a tune (marimba, piano) dies away like a drum, but moves in pitch.
+  if (tonal && poly <= 2 && pitched >= 0.5 && notes >= 3) kind = 'melody';
   // Decay is the clearest sign of a struck sound; noisiness alone only counts when
   // extreme (shakers, brushes), since strummed strings can be fairly noisy too.
-  if (decay < 0.3 || sustain < 0.3 || flatness > 0.35 || (flatness > 0.2 && decay < 0.5)) kind = 'rhythm';
+  else if (decay < 0.3 || sustain < 0.3 || flatness > 0.35 || (flatness > 0.2 && decay < 0.5)) kind = 'rhythm';
+  // Several notes at once is chords, even when they blend into one clear pitch.
+  else if (poly >= 3) kind = 'chords';
   else if (pitched >= 0.6) kind = 'melody';
   else kind = 'chords';
   return { kind, features };
@@ -260,8 +273,9 @@ function decayOf(x, sr, hits) {
 // Everything a new layer needs: its kind, plus the analysis each kind uses.
 export function analyze(x, sr, track) {
   const hits = hitsOf(x, sr);
-  const { kind, features } = classify(x, sr, track, hits);
-  return { kind, features, hits, chroma: chromaOf(x, sr) };
+  const chroma = chromaOf(x, sr);
+  const { kind, features } = classify(x, sr, track, hits, chroma);
+  return { kind, features, hits, chroma };
 }
 
 // Peak normalisation for struck and strummed sounds: unlike the loudness levelling

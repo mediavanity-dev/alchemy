@@ -1,8 +1,8 @@
 // Pitch tracking (McLeod Pitch Method) and note segmentation for sung / hummed audio.
 
 const TARGET_RATE = 12000;
-const MIN_FREQ = 65;
-const MAX_FREQ = 1100;
+const MIN_FREQ = 38; // a bass guitar's low E is 41 Hz
+const MAX_FREQ = 2400; // flute, violin and whistling reach past 2 kHz
 
 export const freqToMidi = (f) => 69 + 12 * Math.log2(f / 440);
 export const midiToFreq = (m) => 440 * Math.pow(2, (m - 69) / 12);
@@ -164,7 +164,7 @@ export function segmentNotes({ frames, hop }) {
   const gate = Math.max(0.003, p95 * 0.12);
 
   const raw = frames.map((f) =>
-    f.midi != null && f.rms >= gate && f.clarity >= 0.78 && f.midi > 30 && f.midi < 90 ? f.midi : null
+    f.midi != null && f.rms >= gate && f.clarity >= 0.78 && f.midi > 26 && f.midi < 100 ? f.midi : null
   );
 
   // Median filter removes single-frame octave slips.

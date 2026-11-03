@@ -33,8 +33,7 @@
       <section class="view active" id="view-capture" aria-label="Capture">
         <div class="capture">
           <div class="capture-copy">
-            <h1 class="prompt" id="capturePrompt">Hum or sing a melody</h1>
-            <p class="prompt-sub" id="captureSub">One clear line, a few bars long. Alchemy will find the key and the chords underneath.</p>
+            <h1 class="prompt" id="capturePrompt">Tap record, then sing or play a melody</h1>
           </div>
 
           <div class="live">
@@ -56,7 +55,13 @@
             </button>
             <div class="rec-wrap">
               <div class="rec-ring" id="recRing"></div>
-              <button class="rec-btn" id="recBtn" aria-label="Start recording"><span class="rec-icon"></span></button>
+              <button class="rec-btn" id="recBtn" aria-label="Start recording">
+                <svg class="rec-label" viewBox="0 0 100 100" aria-hidden="true">
+                  <path id="recArc" d="M 18 50 A 32 32 0 0 1 82 50" fill="none"/>
+                  <text><textPath href="#recArc" startOffset="50%" text-anchor="middle" id="recWord">record</textPath></text>
+                </svg>
+                <span class="rec-icon"></span>
+              </button>
             </div>
             <div class="rec-time" id="recTime">Tap to record</div>
             <div class="alt-inputs">

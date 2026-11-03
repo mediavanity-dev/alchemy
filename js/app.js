@@ -199,7 +199,7 @@ async function startRecording() {
     mic = await openMic(onChunk);
   } catch (e) {
     starting = false;
-    $('#capturePrompt').textContent = 'Hum or sing a melody';
+    $('#capturePrompt').textContent = 'Tap record, then sing or play a melody';
     toast(e.message);
     return;
   }
@@ -208,6 +208,7 @@ async function startRecording() {
 
   document.body.classList.add('recording');
   $('#recBtn').setAttribute('aria-label', 'Stop recording');
+  $('#recWord').textContent = 'stop';
   $('#recTime').textContent = '0:00';
   haptic(15);
   rec.timer = setInterval(() => {
@@ -405,7 +406,8 @@ async function stopRecording() {
 
   document.body.classList.remove('recording');
   $('#recBtn').setAttribute('aria-label', 'Start recording');
-  $('#capturePrompt').textContent = 'Hum or sing a melody';
+  $('#recWord').textContent = 'record';
+  $('#capturePrompt').textContent = 'Tap record, then sing or play a melody';
   $('#recTime').textContent = 'Tap to record';
   $('#liveNote').classList.remove('count');
   resetLive();
@@ -575,24 +577,28 @@ async function processAudio(samples, sampleRate, name, tempo = null) {
 
   const track = await extractTrack(samples, sampleRate, (p) => setProcessing(true, 0.05 + p * 0.85));
   const { notes, offset, trace, traceT0, hop } = segmentNotes(track);
-  // The main take is the tune everything is built on; beats and chords go on top as layers.
-  const { kind } = classify(raw, sampleRate, track);
+  // The main take is the tune everything is built on (sung, or played on any melodic
+  // instrument); beats and chords go on top as layers.
+  const { kind, features } = classify(raw, sampleRate, track);
+  // Plucked and struck instruments are levelled by their peaks, so their attacks
+  // aren't rounded off the way loudness levelling (made for singing) would.
+  if (kind === 'melody' && features.decay < 0.6) samples = normalizePeak(raw);
   setProcessing(true, 1);
   await new Promise((r) => setTimeout(r, 250));
   setProcessing(false);
 
   if (kind === 'rhythm') {
-    toast('That sounded like rhythm. Hum or sing your tune here first, then add beats as a layer: Tracks, on the Harmony page.', 6500);
+    toast('That sounded like rhythm. Record your tune here first (sung or played, one note at a time), then add beats as a layer: Tracks, on the Harmony page.', 6500);
     return;
   }
   if (notes.length < 3) {
     toast(kind === 'chords'
-      ? 'That sounded like chords. Hum or sing your tune here first, then add instruments as a layer: Tracks, on the Harmony page.'
-      : "I couldn't hear a clear melody. Try humming a little louder, one note at a time.", 6500);
+      ? 'That sounded like chords. Record your tune here first, one note at a time, then add chords as a layer: Tracks, on the Harmony page.'
+      : "I couldn't hear a clear melody. Try singing or playing a little louder, one note at a time.", 6500);
     return;
   }
   if (kind === 'chords') {
-    setTimeout(() => toast('That sounded like chords. It works best to sing the tune here and add instruments as a layer in Tracks.', 6000), 600);
+    setTimeout(() => toast('That sounded like chords. It works best to record the tune here, one note at a time, and add chords as a layer in Tracks.', 6000), 600);
   }
 
   const duration = samples.length / sampleRate;
