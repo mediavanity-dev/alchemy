@@ -432,7 +432,14 @@ main { flex: 1; position: relative; overflow: hidden; }
 .trimming .rec-dot { display: none; }
 @keyframes blink { from { opacity: 1; } to { opacity: 0.25; } }
 .layering .play-btn { background: var(--rose); color: #fff; }
-.transport-row { display: flex; align-items: center; justify-content: space-between; padding: 0 12px; }
+.transport-row { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 0 12px; }
+.transport-side { display: flex; align-items: center; }
+.transport-side.end { justify-content: space-between; padding-left: 16px; }
+.loop-btn { width: 44px; height: 44px; color: var(--muted); border-color: transparent; background: transparent; }
+.loop-btn.on { color: var(--gold); background: var(--surface-2); border-color: var(--gold); }
+.loop-btn svg { width: 22px; height: 22px; }
+.record-row { display: flex; align-items: center; gap: 10px; }
+.record-row .btn { flex: 1; }
 .icon-btn {
   width: 50px;
   height: 50px;

@@ -27,6 +27,7 @@ const state = {
   toneOctave: null,
   editing: null,
   countIn: { on: false, bpm: 100, meter: '4/4' },
+  loop: false,
   metronome: false,
 };
 
@@ -823,7 +824,7 @@ function drawRoll(playT = null) {
   const play = state.playing;
   const { start, end } = trimming
     ? { start: 0, end: take.duration }
-    : layerRec && play ? { start: play.start, end: play.viewEnd } : takeRange();
+    : layerRec && play ? { start: play.viewStart, end: play.viewEnd } : takeRange();
   const inView = (n) => n.end > start && n.start < end;
 
   const groups = [
@@ -1016,6 +1017,15 @@ function drawRoll(playT = null) {
   if (playT != null) {
     g.fillStyle = cText;
     g.fillRect(Math.round(x(playT)), top, 1.5, h - top - 4);
+  }
+
+  if (play?.countLabel) {
+    g.font = '500 72px ' + token('--serif');
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillStyle = cGold;
+    g.fillText(String(play.countLabel), w / 2, top + rollH / 2);
+    g.textAlign = 'left';
   }
 }
 
@@ -1334,46 +1344,80 @@ function scheduleClip(clip, clipStart, t0, start, end, dest) {
   if (b > a) synth.voice(buf, t0 + (a - start), a - clipStart, b - a, dest);
 }
 
-function startPlayback() {
+// Schedules everything in [a, b] of the take's timeline to start at audio time t0,
+// into the given track buses. Clicks start at `clickFrom` (later than `a` when a
+// count-in already covers the first bar).
+function schedulePass(t0, a, b, buses, clickFrom = a) {
+  const take = state.take;
+  for (const s of resolvedSegments()) {
+    if (s.end > a && s.start < b) synth.chord(voicing(s.chord), t0 + Math.max(0, s.start - a), Math.min(s.end, b) - Math.max(s.start, a), 1, buses.backing);
+  }
+  scheduleClip(voiceClip(take), 0, t0, a, b, buses.take);
+  for (const l of take.layers) {
+    if (kindOf(l) === 'rhythm' && l.sound === 'kit') {
+      for (const h of l.hits) {
+        const at = l.offset + h.t;
+        if (at >= a && at < b) synth.drum(h.d, t0 + at - a, h.s, buses[l.id]);
+      }
+    } else scheduleClip(voiceClip(l), l.offset, t0, a, b, buses[l.id]);
+  }
+  for (const n of analysisNotes()) if (n.start >= a && n.start < b) synth.lead(n.midi, t0 + n.start - a, n.end - n.start, buses.guide);
+  if (take.tempo) {
+    // While recording a layer the click keeps going past the end of the take.
+    const clickEnd = layerRec ? a + MAX_LAYER_SECONDS : b;
+    for (const beat of beatsBetween(take.tempo, clickFrom, clickEnd)) {
+      if (beat.t < b || layerRec) synth.click(t0 + beat.t - a, beat.accent, buses.click);
+    }
+  }
+}
+
+// One bar of clicks before a layer recording. With a beat grid it lands the singer
+// on a bar line of the take; without one it's a plain lead-in at the count-in tempo.
+function countInBar(start) {
+  const g = state.take.tempo ?? { beat: 60 / state.countIn.bpm, downbeat: start, meter: state.countIn.meter };
+  const per = barBeats(g.meter), bar = per * g.beat;
+  const land = g.downbeat + Math.ceil((start - g.downbeat) / bar - 0.05) * bar;
+  return { from: land - bar, land, beat: g.beat, per };
+}
+
+function startPlayback({ countIn = false } = {}) {
   if (!state.take) return;
   stopPlayback();
   const take = state.take;
   const ctx = synth.begin();
-  const { start, end } = state.trimming ?? takeRange();
+  const range = state.trimming ?? takeRange();
+  let { start, end } = range;
   const t0 = ctx.currentTime + 0.1;
-
   const buses = {};
+  let count = null;
+
   if (state.trimming) {
     scheduleClip(take, 0, t0, start, end);
   } else {
-    // Every track is scheduled into its own gain stage, muted ones at zero, so the
-    // mix can change while it plays.
-    const bus = (id) => {
+    // A loop over a trusted beat grid is rounded out to whole bars, so the groove
+    // carries straight on across the seam.
+    const grid = harmonyOptions().tempo;
+    if (state.loop && !layerRec && grid) {
+      const bar = barBeats(grid.meter) * grid.beat;
+      start = grid.downbeat + Math.floor((start - grid.downbeat) / bar + 0.02) * bar;
+      end = start + Math.max(1, Math.ceil((end - start) / bar - 0.05)) * bar;
+    }
+    // Every track gets its own gain stage, muted ones at zero, so the mix can change
+    // while it plays.
+    for (const id of ['backing', 'take', 'guide', 'click', ...take.layers.map((l) => l.id)]) {
       const t = track(id);
-      return (buses[id] = synth.bus(t.on ? t.vol : 0));
-    };
-    const backing = bus('backing');
-    for (const s of resolvedSegments()) synth.chord(voicing(s.chord), t0 + s.start - start, s.end - s.start, 1, backing);
-    scheduleClip(voiceClip(take), 0, t0, start, end, bus('take'));
-    for (const l of take.layers) {
-      const b = bus(l.id);
-      if (kindOf(l) === 'rhythm' && l.sound === 'kit') {
-        for (const h of l.hits) {
-          const at = l.offset + h.t;
-          if (at >= start && at < end) synth.drum(h.d, t0 + at - start, h.s, b);
-        }
-      } else scheduleClip(voiceClip(l), l.offset, t0, start, end, b);
+      buses[id] = synth.bus(t.on ? t.vol : 0);
     }
-    const guide = bus('guide');
-    for (const n of analysisNotes()) if (n.start >= start && n.start < end) synth.lead(n.midi, t0 + n.start - start, n.end - n.start, guide);
-    if (take.tempo) {
-      const click = bus('click');
-      // While recording a layer the click keeps going past the end of the take.
-      const clickEnd = layerRec ? start + MAX_LAYER_SECONDS : end;
-      for (const b of beatsBetween(take.tempo, start, clickEnd)) synth.click(t0 + b.t - start, b.accent, click);
+    let clickFrom = start;
+    if (countIn) {
+      count = countInBar(start);
+      for (let k = 0; k < count.per; k++) synth.click(t0 + k * count.beat, k === 0);
+      clickFrom = count.land;
+      start = count.from;
     }
+    schedulePass(t0, start, end, buses, clickFrom);
   }
-  state.playing = { t0, start, end, viewEnd: end, raf: 0, seg: -1, buses };
+  state.playing = { t0, start, end, viewStart: range.start, viewEnd: end, raf: 0, seg: -1, buses, count, queued: false };
   $('#playBtn').classList.add('playing');
   $('#playBtn').setAttribute('aria-label', 'Stop');
   tick();
@@ -1382,17 +1426,38 @@ function startPlayback() {
 function tick() {
   const p = state.playing;
   if (!p) return;
-  const t = p.start + (synth.ctx.currentTime - p.t0);
+  let t = p.start + (synth.ctx.currentTime - p.t0);
+  // Count-in: a big number counting down to the bar line where the layer starts
+  const counting = p.count && t < p.count.land;
+  p.countLabel = counting ? Math.min(p.count.per, Math.ceil((p.count.land - t) / p.count.beat - 1e-3)) : null;
+  if (counting && p.countLabel !== p.lastCount) {
+    p.lastCount = p.countLabel;
+    haptic(8);
+  }
   if (layerRec) {
     // A layer keeps recording past the end of the take until the user stops it;
     // the view widens to make room.
     if (t - p.start >= MAX_LAYER_SECONDS) { stopLayer(); return; }
     p.viewEnd = Math.max(p.end, t + 1);
-    drawRoll(Math.max(p.start, t));
-    updateTransportStatus(`Recording ${layerRec.name} · ${fmtTime(Math.max(0, t - p.start))}${t > p.end ? ' · tap ■ to finish' : ''}`);
+    drawRoll(Math.max(p.viewStart, t));
+    const from = p.count ? p.count.land : p.start;
+    updateTransportStatus(counting
+      ? `${layerRec.name} starts in ${p.countLabel}`
+      : `Recording ${layerRec.name} · ${fmtTime(Math.max(0, t - from))}${t > p.end ? ' · tap ■ to finish' : ''}`);
   } else {
+    const len = p.end - p.start;
+    // Looping: queue the next pass just before this one ends, then move the clock on.
+    if (state.loop && !state.trimming && !p.queued && t >= p.end - 0.4) {
+      schedulePass(p.t0 + len, p.start, p.end, p.buses);
+      p.queued = true;
+    }
+    if (p.queued && t >= p.end) {
+      p.t0 += len;
+      p.queued = false;
+      t -= len;
+    }
     if (t >= p.end + 0.6) { stopPlayback(); return; }
-    drawRoll(Math.max(p.start, Math.min(t, p.end)));
+    drawRoll(Math.max(p.viewStart, Math.min(t, p.end)));
   }
   if (!state.trimming) {
     const idx = resolvedSegments().findIndex((s) => t >= s.start && t < s.end);
@@ -1420,6 +1485,21 @@ function audition(chord) {
   const ctx = synth.begin();
   synth.chord(voicing(chord), ctx.currentTime + 0.02, 1.3, 0.9);
 }
+
+function setLoop(on) {
+  state.loop = on;
+  try { localStorage.setItem('alchemy.loop', on ? '1' : '0'); } catch { /* storage unavailable */ }
+  $('#loopBtn').classList.toggle('on', on);
+  $('#loopBtn').setAttribute('aria-pressed', String(on));
+}
+
+$('#loopBtn').addEventListener('click', () => {
+  setLoop(!state.loop);
+  haptic();
+  // With a beat grid the loop is rounded to whole bars, so restart on that span.
+  if (state.loop && state.playing && !layerRec && !state.trimming && harmonyOptions().tempo) startPlayback();
+  toast(state.loop ? 'Loop on' : 'Loop off', 1200);
+});
 
 $('#playBtn').addEventListener('click', () => {
   if (layerRec) stopLayer();
@@ -1452,9 +1532,8 @@ async function startLayer() {
   }
   layerRec = { mic, name, chunks: [], length: 0, firstTime: null };
   document.body.classList.add('layering');
-  startPlayback();
+  startPlayback({ countIn: layerCountIn() });
   layerRec.play = state.playing;
-  updateTransportStatus(`Recording ${name}`);
   haptic(15);
 }
 
@@ -1619,6 +1698,11 @@ function setTrack(id, patch) {
 
 $('#layersBtn').addEventListener('click', openTracksSheet);
 
+// One bar of clicks before each layer, unless switched off.
+function layerCountIn() {
+  try { return localStorage.getItem('alchemy.layerCountIn') !== '0'; } catch { return true; }
+}
+
 function openTracksSheet() {
   const take = state.take;
   const check = '<span class="chk"></span>';
@@ -1661,11 +1745,21 @@ function openTracksSheet() {
       ${row('guide', 'guide', 'Guide melody', 'Your notes, played clean')}
       ${take.tempo ? row('click', 'click', 'Click', `${Math.round(take.tempo.bpm)} bpm`) : ''}
     </div>
-    <button class="btn primary block" id="layerRecord" ${full ? 'disabled' : ''}><span class="dot"></span>${full ? 'Layer limit reached' : 'Record a layer'}</button>
+    <div class="record-row">
+      <button class="pill ${layerCountIn() ? 'on' : ''}" id="layerCountIn" aria-pressed="${layerCountIn()}">${check}Count-in</button>
+      <button class="btn primary" id="layerRecord" ${full ? 'disabled' : ''}><span class="dot"></span>${full ? 'Layer limit reached' : 'Record a layer'}</button>
+    </div>
   </div>`);
 
   const body = $('#sheetBody .tracks-sheet');
   $('#layerRecord').addEventListener('click', startLayer);
+  $('#layerCountIn').addEventListener('click', () => {
+    const on = !layerCountIn();
+    try { localStorage.setItem('alchemy.layerCountIn', on ? '1' : '0'); } catch { /* storage unavailable */ }
+    haptic();
+    openTracksSheet();
+    toast(on ? 'Layers start after one bar of clicks.' : 'Layers start straight away.');
+  });
   body.addEventListener('input', (e) => {
     if (!e.target.classList.contains('track-vol')) return;
     setTrack(e.target.closest('.track').dataset.track, { vol: +e.target.value });
@@ -2201,6 +2295,7 @@ document.addEventListener('visibilitychange', () => {
 
 setAudioSession('playback');
 state.countIn = loadCountIn();
+try { setLoop(localStorage.getItem('alchemy.loop') === '1'); } catch { /* storage unavailable */ }
 renderCountIn();
 resetLive();
 drawLive();

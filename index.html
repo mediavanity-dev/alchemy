@@ -159,16 +159,23 @@
           <div class="transport">
             <div class="transport-status" id="transportStatus" hidden><span class="rec-dot"></span><span id="transportStatusText"></span></div>
             <div class="transport-row">
-              <button class="icon-btn" id="saveBtn" aria-label="Save to library">
-                <svg viewBox="0 0 24 24"><path d="M6 3h12v18l-6-4-6 4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
-              </button>
+              <div class="transport-side">
+                <button class="icon-btn" id="saveBtn" aria-label="Save to library">
+                  <svg viewBox="0 0 24 24"><path d="M6 3h12v18l-6-4-6 4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+                </button>
+              </div>
               <button class="play-btn" id="playBtn" aria-label="Play">
                 <svg class="i-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
                 <svg class="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>
               </button>
-              <button class="icon-btn" id="shareBtn" aria-label="Share chord chart">
-                <svg viewBox="0 0 24 24"><path d="M12 15V3m0 0L7.5 7.5M12 3l4.5 4.5M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-              </button>
+              <div class="transport-side end">
+                <button class="icon-btn loop-btn" id="loopBtn" aria-pressed="false" aria-label="Loop">
+                  <svg viewBox="0 0 24 24"><path d="M17 3l3 3-3 3M4 12v-1a5 5 0 0 1 5-5h11M7 21l-3-3 3-3M20 12v1a5 5 0 0 1-5 5H4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+                <button class="icon-btn" id="shareBtn" aria-label="Share chord chart">
+                  <svg viewBox="0 0 24 24"><path d="M12 15V3m0 0L7.5 7.5M12 3l4.5 4.5M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+              </div>
             </div>
           </div>
         </div>
