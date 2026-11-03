@@ -245,19 +245,24 @@ function startBeatGuide(r, gridT0) {
   const wrap = $('#beatDots');
   const dots = [...wrap.children];
   const ring = $('#recRing');
+  const flash = $('#beatFlash');
   wrap.hidden = false;
   const frame = () => {
     if (rec !== r) {
       wrap.hidden = true;
       dots.forEach((d) => d.classList.remove('on'));
       ring.classList.remove('beat');
+      flash.classList.remove('on', 'accent');
       return;
     }
     const pos = (ctx.currentTime - gridT0) / r.beat;
     const k = Math.floor(pos), frac = pos - k;
     const idx = pos < 0 ? -1 : k % 4;
     dots.forEach((d, i) => d.classList.toggle('on', i === idx && frac < 0.55));
-    ring.classList.toggle('beat', pos >= 0 && frac < 0.18);
+    const hit = pos >= 0 && frac < 0.18;
+    ring.classList.toggle('beat', hit);
+    flash.classList.toggle('on', hit);
+    flash.classList.toggle('accent', hit && idx === 0);
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
@@ -328,6 +333,19 @@ function drawLive() {
     g.fillRect(left, y(m) - 0.5, w - left, 1);
     g.fillStyle = token('--faint');
     g.fillText(noteLabel(m), 8, y(m));
+  }
+
+  // With a count-in, beat lines scroll with the trace (bar lines stronger), so you
+  // can see your notes land on the beat. The take starts on beat 1 at t = 0.
+  if (rec?.bpm && now > 0) {
+    g.fillStyle = token('--gold');
+    for (let k = Math.max(0, Math.ceil((now - span) / rec.beat)); k * rec.beat <= now; k++) {
+      const bx = w - 6 - ((now - k * rec.beat) / span) * (w - left - 6);
+      const bar = k % 4 === 0;
+      g.globalAlpha = bar ? 0.5 : 0.2;
+      g.fillRect(Math.round(bx), 0, bar ? 2 : 1, h);
+    }
+    g.globalAlpha = 1;
   }
 
   g.strokeStyle = token('--gold');
