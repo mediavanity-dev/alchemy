@@ -1,0 +1,2 @@
+An app that will take as input a hummed or sung vocal line, and from that present the
+harmonic structure it could sit within. 

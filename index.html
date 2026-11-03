@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#120f1a" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f7f3ea" media="(prefers-color-scheme: light)">
+  <meta name="description" content="Hum a melody and discover the harmony it could live in.">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Alchemy">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <title>Alchemy</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 5 L28 26 H4 Z" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"/><path d="M10.5 19.5 q1.4 -2.4 2.8 0 t2.8 0 t2.8 0 t2.8 0" fill="none" stroke="var(--violet)" stroke-width="2" stroke-linecap="round"/></svg>
+        <span>Alchemy</span>
+      </div>
+      <span class="topbar-sub">hum → harmony</span>
+    </header>
+
+    <main>
+      <!-- Capture -->
+      <section class="view active" id="view-capture" aria-label="Capture">
+        <div class="capture">
+          <div class="capture-copy">
+            <h1 class="prompt" id="capturePrompt">Hum or sing a melody</h1>
+            <p class="prompt-sub" id="captureSub">One clear line, a few bars long. Alchemy will find the key and the chords underneath.</p>
+          </div>
+
+          <div class="live">
+            <div class="live-note" id="liveNote">–</div>
+            <div class="cents" aria-hidden="true">
+              <span>♭</span>
+              <div class="cents-track"><div class="cents-needle" id="centsNeedle"></div></div>
+              <span>♯</span>
+            </div>
+          </div>
+
+          <canvas id="liveCanvas" class="live-canvas" aria-label="Live pitch trace"></canvas>
+
+          <div class="rec-area">
+            <div class="rec-wrap">
+              <div class="rec-ring" id="recRing"></div>
+              <button class="rec-btn" id="recBtn" aria-label="Start recording"><span class="rec-icon"></span></button>
+            </div>
+            <div class="rec-time" id="recTime">Tap to record</div>
+            <div class="alt-inputs">
+              <label class="import-link">Import audio<input type="file" accept="audio/*" id="fileInput" hidden></label>
+              <span aria-hidden="true">·</span>
+              <button class="import-link" id="demoBtn">Try a demo</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Harmony -->
+      <section class="view" id="view-harmony" aria-label="Harmony">
+        <div class="empty" id="harmonyEmpty">
+          <svg viewBox="0 0 64 64" aria-hidden="true"><path d="M32 8 L58 54 H6 Z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/><path d="M19 40 q3.25 -5.5 6.5 0 t6.5 0 t6.5 0 t6.5 0" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
+          <h2>Nothing transmuted yet</h2>
+          <p>Record a melody on the Capture tab and its harmony will appear here.</p>
+          <button class="btn primary" data-goto="capture">Start capturing</button>
+        </div>
+
+        <div class="harmony" id="harmonyContent" hidden>
+          <div class="key-card">
+            <div class="eyebrow" id="takeName"></div>
+            <h1 class="key-title" id="keyTitle"></h1>
+            <div class="key-meta" id="keyMeta"></div>
+          </div>
+
+          <div class="chips" id="keyChips" role="listbox" aria-label="Possible keys"></div>
+
+          <canvas id="rollCanvas" class="roll" aria-label="Melody and chords"></canvas>
+
+          <div class="controls">
+            <div class="control">
+              <span class="label">Chord changes</span>
+              <div class="seg" data-setting="rhythm">
+                <button data-value="slow">Slow</button><button data-value="medium">Medium</button><button data-value="fast">Fast</button>
+              </div>
+            </div>
+            <div class="control">
+              <span class="label">Palette</span>
+              <div class="seg" data-setting="palette">
+                <button data-value="simple">Simple</button><button data-value="rich">Rich</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="section-head"><h2>Progression</h2><span class="hint">Tap a chord to change it</span></div>
+          <div class="chords" id="chordList"></div>
+
+          <div class="section-head"><h2>Melody</h2><span class="hint" id="tuningHint"></span></div>
+          <div class="melody" id="melodyLine"></div>
+
+          <div class="transport">
+            <div class="seg mode-seg" data-setting="mode">
+              <button data-value="voice">Voice + chords</button><button data-value="melody">Melody + chords</button><button data-value="chords">Chords</button>
+            </div>
+            <div class="transport-row">
+              <button class="icon-btn" id="saveBtn" aria-label="Save to library">
+                <svg viewBox="0 0 24 24"><path d="M6 3h12v18l-6-4-6 4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+              </button>
+              <button class="play-btn" id="playBtn" aria-label="Play">
+                <svg class="i-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+                <svg class="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>
+              </button>
+              <button class="icon-btn" id="shareBtn" aria-label="Share chord chart">
+                <svg viewBox="0 0 24 24"><path d="M12 15V3m0 0L7.5 7.5M12 3l4.5 4.5M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Library -->
+      <section class="view" id="view-library" aria-label="Library">
+        <h1 class="page-title">Library</h1>
+        <ul class="lib-list" id="libList"></ul>
+        <div class="empty" id="libEmpty" hidden>
+          <svg viewBox="0 0 64 64" aria-hidden="true"><path d="M18 8h28v48l-14-9-14 9z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/></svg>
+          <h2>No saved takes</h2>
+          <p>Save a take from the Harmony tab to keep its melody and chords here.</p>
+        </div>
+      </section>
+    </main>
+
+    <nav class="tabbar" aria-label="Main">
+      <button class="tab active" data-view="capture">
+        <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <span>Capture</span>
+      </button>
+      <button class="tab" data-view="harmony">
+        <svg viewBox="0 0 24 24"><path d="M12 3 L21 19 H3 Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 14.5 q1 -1.7 2 0 t2 0 t2 0 t2 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <span>Harmony</span>
+      </button>
+      <button class="tab" data-view="library">
+        <svg viewBox="0 0 24 24"><path d="M6 3h12v18l-6-4-6 4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+        <span>Library</span>
+      </button>
+    </nav>
+  </div>
+
+  <div class="sheet-backdrop" id="sheetBackdrop"></div>
+  <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-hidden="true">
+    <div class="sheet-grip"></div>
+    <div id="sheetBody"></div>
+  </div>
+
+  <div class="processing" id="processing" aria-live="polite">
+    <div class="flask"><div class="flask-fill" id="processFill"></div></div>
+    <p>Transmuting…</p>
+  </div>
+
+  <div class="toast" id="toast" role="status"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
