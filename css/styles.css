@@ -440,6 +440,7 @@ main { flex: 1; position: relative; overflow: hidden; }
 .loop-btn svg { width: 22px; height: 22px; }
 .record-row { display: flex; align-items: center; gap: 10px; }
 .record-row .btn { flex: 1; }
+.record-note { margin: 10px 2px 0; font-size: 12px; color: var(--muted); text-align: center; }
 .icon-btn {
   width: 50px;
   height: 50px;
@@ -594,6 +595,9 @@ main { flex: 1; position: relative; overflow: hidden; }
 .track-opts .icon-sm { margin-left: auto; }
 .kind-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 12px; border-radius: 999px; border: 1px dashed var(--line); font-size: 13px; color: var(--text); }
 .kind-chip svg { width: 15px; height: 15px; color: var(--gold); }
+.pass-pick { display: inline-flex; align-items: center; min-height: 34px; border-radius: 999px; border: 1px solid var(--gold); font-size: 13px; color: var(--text); font-variant-numeric: tabular-nums; }
+.pass-pick span { padding: 0 2px; }
+.pass-pick button { width: 34px; height: 34px; border-radius: 50%; font-size: 18px; color: var(--gold); }
 .track-group { margin: 10px 4px 0; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 .btn .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--rose); margin-right: 10px; }
 

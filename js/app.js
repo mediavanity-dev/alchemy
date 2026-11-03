@@ -140,9 +140,9 @@ async function openMic(onChunk) {
   source.connect(node);
   node.connect(sink).connect(ctx.destination);
   const settings = stream.getAudioTracks()[0]?.getSettings?.() ?? {};
-  // Wait for the first mic audio, then a moment more for the output route to settle
-  // (Bluetooth headsets in particular take a while to switch).
-  await Promise.race([flowing, new Promise((r) => setTimeout(r, 2000))]);
+  // Wait for the first mic audio (a phone's first ever start can be slow), then a
+  // moment more for the output route to settle (Bluetooth headsets take a while).
+  await Promise.race([flowing, new Promise((r) => setTimeout(r, 5000))]);
   await new Promise((r) => setTimeout(r, 250));
   return {
     sr: ctx.sampleRate,
@@ -1363,10 +1363,11 @@ function schedulePass(t0, a, b, buses, clickFrom = a) {
   }
   for (const n of analysisNotes()) if (n.start >= a && n.start < b) synth.lead(n.midi, t0 + n.start - a, n.end - n.start, buses.guide);
   if (take.tempo) {
-    // While recording a layer the click keeps going past the end of the take.
-    const clickEnd = layerRec ? a + MAX_LAYER_SECONDS : b;
+    // While recording a layer (not looping) the click keeps going past the end of the take.
+    const runOn = layerRec && !layerRec.loop;
+    const clickEnd = runOn ? a + MAX_LAYER_SECONDS : b;
     for (const beat of beatsBetween(take.tempo, clickFrom, clickEnd)) {
-      if (beat.t < b || layerRec) synth.click(t0 + beat.t - a, beat.accent, buses.click);
+      if (beat.t < b || runOn) synth.click(t0 + beat.t - a, beat.accent, buses.click);
     }
   }
 }
@@ -1390,6 +1391,7 @@ function startPlayback({ countIn = false } = {}) {
   const t0 = ctx.currentTime + 0.1;
   const buses = {};
   let count = null;
+  let loopStart = start;
 
   if (state.trimming) {
     scheduleClip(take, 0, t0, start, end);
@@ -1397,7 +1399,7 @@ function startPlayback({ countIn = false } = {}) {
     // A loop over a trusted beat grid is rounded out to whole bars, so the groove
     // carries straight on across the seam.
     const grid = harmonyOptions().tempo;
-    if (state.loop && !layerRec && grid) {
+    if (state.loop && (!layerRec || layerRec.loop) && grid) {
       const bar = barBeats(grid.meter) * grid.beat;
       start = grid.downbeat + Math.floor((start - grid.downbeat) / bar + 0.02) * bar;
       end = start + Math.max(1, Math.ceil((end - start) / bar - 0.05)) * bar;
@@ -1408,6 +1410,7 @@ function startPlayback({ countIn = false } = {}) {
       const t = track(id);
       buses[id] = synth.bus(t.on ? t.vol : 0);
     }
+    loopStart = start;
     let clickFrom = start;
     if (countIn) {
       count = countInBar(start);
@@ -1417,7 +1420,11 @@ function startPlayback({ countIn = false } = {}) {
     }
     schedulePass(t0, start, end, buses, clickFrom);
   }
-  state.playing = { t0, start, end, viewStart: range.start, viewEnd: end, raf: 0, seg: -1, buses, count, queued: false };
+  state.playing = {
+    t0, start, end, viewStart: range.start, viewEnd: end, raf: 0, seg: -1, buses, count, queued: false,
+    // The looped span and when its first pass begins (after any count-in), in audio time
+    loopStart, loopWall0: t0 + (loopStart - start), pass: 1, startedAt: t0,
+  };
   $('#playBtn').classList.add('playing');
   $('#playBtn').setAttribute('aria-label', 'Stop');
   tick();
@@ -1434,28 +1441,36 @@ function tick() {
     p.lastCount = p.countLabel;
     haptic(8);
   }
+  // Looping: queue the next pass just before this one ends, then move the clock on.
+  // The count-in (before loopStart) only ever plays once.
+  const looping = !state.trimming && (layerRec ? layerRec.loop : state.loop);
+  const len = p.end - p.loopStart;
+  if (looping && !p.queued && t >= p.end - 0.4) {
+    schedulePass(p.t0 + (p.end - p.start), p.loopStart, p.end, p.buses);
+    p.queued = true;
+  }
+  if (p.queued && t >= p.end) {
+    p.t0 += len;
+    p.queued = false;
+    p.pass++;
+    t -= len;
+  }
   if (layerRec) {
-    // A layer keeps recording past the end of the take until the user stops it;
-    // the view widens to make room.
-    if (t - p.start >= MAX_LAYER_SECONDS) { stopLayer(); return; }
-    p.viewEnd = Math.max(p.end, t + 1);
-    drawRoll(Math.max(p.viewStart, t));
-    const from = p.count ? p.count.land : p.start;
-    updateTransportStatus(counting
-      ? `${layerRec.name} starts in ${p.countLabel}`
-      : `Recording ${layerRec.name} · ${fmtTime(Math.max(0, t - from))}${t > p.end ? ' · tap ■ to finish' : ''}`);
+    if (synth.ctx.currentTime - p.startedAt >= MAX_LAYER_SECONDS) { stopLayer(); return; }
+    if (layerRec.loop) {
+      drawRoll(Math.max(p.viewStart, t));
+      updateTransportStatus(counting ? `${layerRec.name} starts in ${p.countLabel}` : `Recording ${layerRec.name} · pass ${p.pass}`);
+    } else {
+      // A layer keeps recording past the end of the take until the user stops it;
+      // the view widens to make room.
+      p.viewEnd = Math.max(p.end, t + 1);
+      drawRoll(Math.max(p.viewStart, t));
+      const from = p.count ? p.count.land : p.start;
+      updateTransportStatus(counting
+        ? `${layerRec.name} starts in ${p.countLabel}`
+        : `Recording ${layerRec.name} · ${fmtTime(Math.max(0, t - from))}${t > p.end ? ' · tap ■ to finish' : ''}`);
+    }
   } else {
-    const len = p.end - p.start;
-    // Looping: queue the next pass just before this one ends, then move the clock on.
-    if (state.loop && !state.trimming && !p.queued && t >= p.end - 0.4) {
-      schedulePass(p.t0 + len, p.start, p.end, p.buses);
-      p.queued = true;
-    }
-    if (p.queued && t >= p.end) {
-      p.t0 += len;
-      p.queued = false;
-      t -= len;
-    }
     if (t >= p.end + 0.6) { stopPlayback(); return; }
     drawRoll(Math.max(p.viewStart, Math.min(t, p.end)));
   }
@@ -1530,7 +1545,7 @@ async function startLayer() {
     toast(e.message);
     return;
   }
-  layerRec = { mic, name, chunks: [], length: 0, firstTime: null };
+  layerRec = { mic, name, chunks: [], length: 0, firstTime: null, loop: state.loop };
   document.body.classList.add('layering');
   startPlayback({ countIn: layerCountIn() });
   layerRec.play = state.playing;
@@ -1553,56 +1568,110 @@ async function stopLayer() {
     return;
   }
   const raw = concat(r.chunks, r.length);
-  // Where the first recorded sample sits on the take's timeline, minus the
-  // round trip from speaker to ear to mic.
-  const offset = r.play.start + (r.firstTime - r.play.t0) - outLatency - r.mic.latency;
+  const sr = r.mic.sr;
+  // The round trip from speaker to ear to mic: what was sung at a given moment was
+  // heard this much earlier.
+  const lat = outLatency + r.mic.latency;
+  // Where the first recorded sample sits on the take's timeline
+  const offset = r.play.start + (r.firstTime - r.play.t0) - lat;
 
-  setProcessing(true, 0.1);
+  // A loop recording is cut into one piece per time round; only complete passes
+  // are kept (or the one partial pass if that's all there is).
+  let pieces = [{ raw, offset }];
+  if (r.loop) {
+    const { loopWall0, loopStart, end } = r.play;
+    const len = end - loopStart;
+    const cut = [];
+    for (let k = 0; ; k++) {
+      let i0 = Math.round((loopWall0 + k * len + lat - r.firstTime) * sr);
+      if (i0 >= raw.length) break;
+      let at = loopStart;
+      if (i0 < 0) { at -= i0 / sr; i0 = 0; }
+      const i1 = Math.min(raw.length, Math.round((loopWall0 + (k + 1) * len + lat - r.firstTime) * sr));
+      if (i1 - i0 > sr * 0.5) cut.push({ raw: raw.slice(i0, i1), offset: at, full: i1 - i0 >= len * sr * 0.9 });
+    }
+    const full = cut.filter((c) => c.full);
+    if (full.length) pieces = full;
+    else if (cut.length) pieces = cut.slice(0, 1);
+  }
+
+  setProcessing(true, 0.05);
   await nextFrame();
-  const forPitch = normalizeLoudness(raw.slice(), r.mic.sr);
-  const track = await extractTrack(forPitch, r.mic.sr, (p) => setProcessing(true, 0.1 + p * 0.75));
-  const seg = segmentNotes(track);
-  setProcessing(true, 0.9);
-  await nextFrame();
-  const sound = analyze(raw, r.mic.sr, track);
+  const passes = [];
+  for (const [k, piece] of pieces.entries()) {
+    const span = 0.9 / pieces.length;
+    passes.push(await analyzeRecording(piece.raw, sr, piece.offset, (f) => setProcessing(true, 0.05 + span * (k + f))));
+  }
   setProcessing(false);
-  const kind = sound.kind;
 
+  // Keep the last pass; the others stay a tap away in Tracks.
+  const pick = passes.length - 1;
+  const kind = passes[pick].kindAuto;
   const layer = {
     id: uid(),
     name: r.name,
-    // Singing is levelled by loudness; struck and strummed sounds by their peaks,
-    // so their attacks stay intact.
-    samples: kind === 'melody' ? forPitch : normalizePeak(raw),
-    sampleRate: r.mic.sr,
-    duration: raw.length / r.mic.sr,
-    offset,
-    notes: seg.notes.map((n) => ({ ...n, start: n.start + offset, end: n.end + offset })),
-    // Pitch contour in the layer's own time, for tuning it later
-    trace: seg.trace,
-    traceT0: seg.traceT0,
-    hop: seg.hop,
-    traceOffset: seg.offset,
+    sampleRate: sr,
+    passes,
     kind,
-    kindAuto: kind,
-    chroma: sound.chroma,
-    hits: sound.hits,
     sound: 'original',
     volume: 1,
     muted: false,
     included: false,
   };
+  usePass(layer, pick);
   const take = state.take;
   take.layers.push(layer);
   if (kind === 'rhythm' && take.tempo?.source !== 'countin' && !take.tempo?.manual) retempo();
   markDirty();
   renderHarmony();
-  toast({
-    melody: `${r.name} added as a melody. Turn on Harmony in Tracks to use it for the chords.`,
-    chords: `${r.name} sounds like chords. Turn on Harmony in Tracks to let them guide the progression.`,
-    rhythm: `${r.name} sounds like rhythm (${sound.hits.length} hits). Try Drum kit in Tracks.`,
-  }[kind], 4600);
+  toast(passes.length > 1
+    ? `${r.name}: ${passes.length} passes recorded, keeping the last one. Pick another in Tracks.`
+    : {
+      melody: `${r.name} added as a melody. Turn on Harmony in Tracks to use it for the chords.`,
+      chords: `${r.name} sounds like chords. Turn on Harmony in Tracks to let them guide the progression.`,
+      rhythm: `${r.name} sounds like rhythm (${layer.hits.length} hits). Try Drum kit in Tracks.`,
+    }[kind], 4600);
   haptic([8, 40, 8]);
+}
+
+// Everything one recorded pass needs: its notes and pitch trace, what kind of sound
+// it is, chroma and hits, and its audio levelled to suit that kind.
+async function analyzeRecording(raw, sr, offset, onProgress) {
+  const forPitch = normalizeLoudness(raw.slice(), sr);
+  const track = await extractTrack(forPitch, sr, (f) => onProgress(f * 0.85));
+  const seg = segmentNotes(track);
+  await nextFrame();
+  const sound = analyze(raw, sr, track);
+  onProgress(1);
+  return {
+    // Singing is levelled by loudness; struck and strummed sounds by their peaks,
+    // so their attacks stay intact.
+    samples: sound.kind === 'melody' ? forPitch : normalizePeak(raw),
+    duration: raw.length / sr,
+    offset,
+    notes: seg.notes.map((n) => ({ ...n, start: n.start + offset, end: n.end + offset })),
+    // Pitch contour in the pass's own time, for tuning it later
+    trace: seg.trace,
+    traceT0: seg.traceT0,
+    hop: seg.hop,
+    traceOffset: seg.offset,
+    kindAuto: sound.kind,
+    chroma: sound.chroma,
+    hits: sound.hits,
+  };
+}
+
+// What differs between a layer's passes; the layer carries the chosen one's.
+const PASS_FIELDS = ['samples', 'duration', 'offset', 'notes', 'trace', 'traceT0', 'hop', 'traceOffset', 'kindAuto', 'chroma', 'hits'];
+
+function usePass(l, k) {
+  l.pass = k;
+  for (const f of PASS_FIELDS) l[f] = l.passes[k][f];
+  l.buffer = l.bufferCtx = l.tuned = l.blocks = null;
+  prepareLayer(l);
+  // Keep anything prepareLayer worked out, so switching back is instant.
+  l.passes[k].chroma = l.chroma;
+  l.passes[k].hits = l.hits;
 }
 
 /* ---------- sound kinds and the mix ---------- */
@@ -1679,6 +1748,7 @@ function track(id) {
 
 function setTrack(id, patch) {
   const take = state.take;
+  if (!take) return;
   const l = take.layers.find((x) => x.id === id);
   if (id === 'click') {
     if ('on' in patch) state.metronome = patch.on;
@@ -1725,8 +1795,16 @@ function openTracksSheet() {
     const extra = kind === 'rhythm'
       ? `<button class="pill ${l.sound === 'kit' ? 'on' : ''}" data-act="kit" aria-pressed="${l.sound === 'kit'}">${check}Drum kit</button>`
       : `<button class="pill ${l.included ? 'on' : ''}" data-act="include" aria-pressed="${l.included}">${check}Harmony</button>`;
+    const picker = l.passes?.length > 1
+      ? `<div class="pass-pick" role="group" aria-label="Pass">
+          <button data-act="pass" data-step="-1" aria-label="Previous pass">‹</button>
+          <span>Pass ${l.pass + 1}/${l.passes.length}</span>
+          <button data-act="pass" data-step="1" aria-label="Next pass">›</button>
+        </div>`
+      : '';
     return row(l.id, kind, l.name, sub, `
       <div class="track-opts">
+        ${picker}
         <button class="kind-chip" data-act="kind" aria-label="${KINDS[kind]}. Tap to change what kind of sound this is.">${icon(kind)}${KINDS[kind]}</button>
         ${extra}
         <button class="icon-sm" data-act="delete" aria-label="Delete ${esc(l.name)}">${trashIcon}</button>
@@ -1747,8 +1825,9 @@ function openTracksSheet() {
     </div>
     <div class="record-row">
       <button class="pill ${layerCountIn() ? 'on' : ''}" id="layerCountIn" aria-pressed="${layerCountIn()}">${check}Count-in</button>
-      <button class="btn primary" id="layerRecord" ${full ? 'disabled' : ''}><span class="dot"></span>${full ? 'Layer limit reached' : 'Record a layer'}</button>
+      <button class="btn primary" id="layerRecord" ${full ? 'disabled' : ''}><span class="dot"></span>${full ? 'Layer limit reached' : state.loop ? 'Record passes' : 'Record a layer'}</button>
     </div>
+    ${state.loop && !full ? '<p class="record-note">Loop is on: each time round is kept as a pass, and you pick the best.</p>' : ''}
   </div>`);
 
   const body = $('#sheetBody .tracks-sheet');
@@ -1796,6 +1875,14 @@ function openTracksSheet() {
       if (wasIncluded) reanalyze();
       else renderHarmony();
       toast(`${layer.name} treated as ${KINDS[next].toLowerCase()}${next === layer.kindAuto ? ', as first detected' : ''}.`);
+    } else if (act === 'pass') {
+      const n = layer.passes.length;
+      usePass(layer, (layer.pass + +b.dataset.step + n) % n);
+      markDirty();
+      if (layer.included) reanalyze();
+      else renderHarmony();
+      // Let them hear the pass they picked
+      if (state.playing && !layerRec) startPlayback();
     } else if (act === 'kit') {
       layer.sound = layer.sound === 'kit' ? 'original' : 'kit';
       markDirty();
@@ -2173,7 +2260,10 @@ async function saveTake(name) {
     tune: take.tune,
     traceOffset: take.traceOffset,
     // Chroma and drawing caches are rebuilt from the audio when the take is opened.
-    layers: take.layers.map(({ samples, buffer, bufferCtx, tuned, chroma, blocks, ...rest }) => rest),
+    layers: take.layers.map(({ samples, buffer, bufferCtx, tuned, chroma, blocks, passes, ...rest }) => ({
+      ...rest,
+      passes: passes?.map(({ samples: _, chroma: __, ...pass }) => pass),
+    })),
     mix: take.mix,
     keyIdx: state.keyIdx,
     rhythm: state.rhythm,
@@ -2185,7 +2275,12 @@ async function saveTake(name) {
     noteRev: take.noteRev,
     summary: { key: keyName(key), chords: resolvedSegments().map((s) => s.chord.symbol), length: range.end - range.start },
   };
-  const audio = { base: take.samples, layers: Object.fromEntries(take.layers.map((l) => [l.id, l.samples])) };
+  // A layer with passes stores each pass's audio (the chosen one among them).
+  const audio = {
+    base: take.samples,
+    layers: Object.fromEntries(take.layers.filter((l) => !l.passes).map((l) => [l.id, l.samples])),
+    passes: Object.fromEntries(take.layers.filter((l) => l.passes).map((l) => [l.id, l.passes.map((x) => x.samples)])),
+  };
   try {
     await store.save(meta, audio);
     take.dirty = false;
@@ -2265,7 +2360,14 @@ $('#libList').addEventListener('click', async (e) => {
     const { meta, samples: raw } = await store.load(open.dataset.id);
     // Early saves stored the take's samples directly; newer ones store base + layers.
     const audio = raw instanceof Float32Array ? { base: raw, layers: {} } : raw;
-    const layers = (meta.layers ?? []).map((l) => ({ ...l, samples: audio.layers?.[l.id] })).filter((l) => l.samples);
+    const layers = (meta.layers ?? [])
+      .map((l) => {
+        const clips = audio.passes?.[l.id];
+        if (!l.passes || !clips) return { ...l, passes: undefined, samples: audio.layers?.[l.id] };
+        const passes = l.passes.map((x, k) => ({ ...x, samples: clips[k] }));
+        return { ...l, passes, samples: passes[l.pass ?? 0]?.samples };
+      })
+      .filter((l) => l.samples);
     loadTake({ ...meta, samples: audio.base, layers }, meta);
     showView('harmony');
   } catch {
