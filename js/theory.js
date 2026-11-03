@@ -63,6 +63,7 @@ const RHYTHM = { slow: 6, medium: 4, fast: 2 };
 const FAST_GROUPS = { 2: [1, 1], 3: [2, 1], 4: [2, 2], 5: [3, 2], 6: [3, 3], 7: [4, 3] };
 const MIDBAR_HOLD = 0.3;
 const COLOR_UNSUNG = 0.15;
+const PLAYED_WEIGHT = 1.5; // played chords outweigh what the melody alone suggests
 const PASS_WEIGHT = 0.35;
 
 export const pc = (m) => ((Math.round(m) % 12) + 12) % 12;
@@ -90,9 +91,11 @@ function pearson(a, b) {
 }
 
 // Returns all 24 keys ranked, each with a probability `p`.
-export function detectKeys(notes) {
+// `played`: chroma from instrument layers (see sound.js), counted alongside the notes.
+export function detectKeys(notes, played = []) {
   const hist = new Array(12).fill(0);
   for (const n of notes) hist[pc(n.midi)] += Math.min(n.end - n.start, 1.5);
+  for (const src of played) for (const f of src.frames) for (let k = 0; k < 12; k++) hist[k] += f[k] * src.hop * 1.5;
   const first = pc(notes[0].midi);
   const last = pc(notes[notes.length - 1].midi);
 
@@ -161,8 +164,9 @@ function annotate(notes, tempo) {
 }
 
 // Split the melody into chord-length windows. Window size scales with the
-// singer's typical note spacing, and boundaries snap to nearby note onsets.
-function makeWindows(notes, rhythm) {
+// singer's typical note spacing, and boundaries snap to where a played instrument
+// changes chord, or else to nearby note onsets.
+function makeWindows(notes, rhythm, [t0, t1], changes = []) {
   const onsets = notes.map((n) => n.start);
   const iois = [];
   for (let i = 1; i < onsets.length; i++) {
@@ -172,8 +176,6 @@ function makeWindows(notes, rhythm) {
   iois.sort((a, b) => a - b);
   const med = iois.length ? iois[iois.length >> 1] : 0.5;
 
-  const t0 = notes[0].start;
-  const t1 = notes[notes.length - 1].end;
   const span = t1 - t0;
   let W = Math.min(4.5, Math.max(0.35, med * RHYTHM[rhythm]));
   const count = Math.max(1, Math.round(span / W));
@@ -186,6 +188,11 @@ function makeWindows(notes, rhythm) {
     for (const o of onsets) {
       const d = Math.abs(o - target);
       if (d < bd) { bd = d; best = o; }
+    }
+    let cd = W * 0.5;
+    for (const c of changes) {
+      const d = Math.abs(c - target);
+      if (d < cd) { cd = d; best = c; }
     }
     const prev = bounds[bounds.length - 1];
     if (best <= prev + W * 0.3) best = target;
@@ -202,12 +209,10 @@ function makeWindows(notes, rhythm) {
 // With a known beat grid, chords change on bar lines: every two bars (slow), every
 // bar (medium) or every half bar (fast). A pickup before the first full chord, or a
 // sliver after the last, joins its neighbour.
-function makeGridWindows(notes, rhythm, tempo) {
+function makeGridWindows(notes, rhythm, tempo, [t0, t1]) {
   const per = barBeats(tempo.meter);
   const groups = rhythm === 'fast' ? FAST_GROUPS[per] ?? [per] : rhythm === 'slow' ? [per * 2] : [per];
   const cycle = groups.reduce((a, b) => a + b, 0) * tempo.beat;
-  const t0 = notes[0].start;
-  const t1 = notes[notes.length - 1].end;
   const minLen = groups[groups.length - 1] * tempo.beat * 0.5;
 
   const bounds = [t0], weak = new Set();
@@ -249,17 +254,69 @@ function windowOver(notes, s, e) {
 }
 
 // Best-fitting chords for an arbitrary stretch, e.g. after the user moves a chord.
-export function rankChords(notes, key, vocab, start, end, { palette = 'triads', tempo = null } = {}) {
+export function rankChords(notes, key, vocab, start, end, { palette = 'triads', tempo = null, played = [] } = {}) {
   const scale = scalePcs(key);
-  const win = windowOver(annotate(notes, tempo), start, end);
+  const win = { ...windowOver(annotate(notes, tempo), start, end), played: playedOver(played, start, end) };
   const ranked = choicesFor(vocab, palette)
     .map((c) => ({ chord: c, score: emission(c, win, scale) }))
     .sort((a, b) => b.score - a.score);
   return { ranked, pcs: [...new Set(win.items.map((it) => it.pc))] };
 }
 
+// Average chroma of the instrument layers over [s, e], and how much of that stretch
+// actually had something playing.
+function playedOver(played, s, e) {
+  const vec = new Float32Array(12);
+  let on = 0, all = 0;
+  for (const src of played) {
+    const a = Math.max(0, Math.ceil((s - src.t0) / src.hop)), b = Math.min(src.frames.length - 1, Math.floor((e - src.t0) / src.hop));
+    for (let i = a; i <= b; i++) {
+      const f = src.frames[i];
+      all++;
+      if (f.some((v) => v > 0)) on++;
+      for (let k = 0; k < 12; k++) vec[k] += f[k];
+    }
+  }
+  if (!on) return null;
+  const mx = Math.max(...vec);
+  for (let k = 0; k < 12; k++) vec[k] /= mx;
+  return { vec, cover: on / Math.max(all, 1) };
+}
+
+// Where the played chroma shifts to a different set of notes: chord changes.
+function changePoints(played) {
+  const out = [];
+  const mean = (frames, a, b) => {
+    const v = new Float32Array(12);
+    for (let i = Math.max(0, a); i < Math.min(frames.length, b); i++) for (let k = 0; k < 12; k++) v[k] += frames[i][k];
+    return v;
+  };
+  const cos = (a, b) => {
+    let d = 0, na = 0, nb = 0;
+    for (let k = 0; k < 12; k++) { d += a[k] * b[k]; na += a[k] * a[k]; nb += b[k] * b[k]; }
+    return na && nb ? d / Math.sqrt(na * nb) : 1;
+  };
+  for (const src of played) {
+    const nov = src.frames.map((_, i) => 1 - cos(mean(src.frames, i - 3, i), mean(src.frames, i, i + 3)));
+    nov.forEach((v, i) => {
+      if (v > 0.2 && v >= (nov[i - 1] ?? 0) && v > (nov[i + 1] ?? 0)) out.push(src.t0 + (i - 0.5) * src.hop);
+    });
+  }
+  return out.sort((a, b) => a - b);
+}
+
+// How well a chord matches what was played: cosine similarity between the chroma
+// and the chord's notes, centred so a typical wrong chord scores below zero.
+function playedFit(c, vec) {
+  let dot = 0, norm = 0;
+  for (let k = 0; k < 12; k++) norm += vec[k] * vec[k];
+  for (const t of c.tones) dot += vec[t];
+  return (dot / Math.sqrt(norm * c.tones.length) - 0.62) * 3;
+}
+
 function emission(c, win, scale) {
-  if (win.total <= 1e-6) return 0.25 * c.prior;
+  const fit = win.played ? PLAYED_WEIGHT * win.played.cover * playedFit(c, win.played.vec) : 0;
+  if (win.total <= 1e-6) return 0.25 * c.prior + fit - (c.tones.length > 3 ? 0.08 : 0) - (c.chromatic ? 0.05 : 0);
   let s = 0, colorW = 0;
   // A 7th, 6th or 9th (or a sus 4th) should be there because the melody sings it.
   const special = c.color ?? (c.quality === 'sus4' ? c.tones[1] : null);
@@ -276,8 +333,9 @@ function emission(c, win, scale) {
     } else v = -0.7;
     s += v * it.w;
   }
-  const unsung = special != null && colorW < 0.15 * win.total ? COLOR_UNSUNG : 0;
-  return s / win.total + 0.25 * c.prior - (c.tones.length > 3 ? 0.08 : 0) - unsung - (c.chromatic ? 0.05 : 0);
+  // Played chords can justify the extra note on their own.
+  const unsung = special != null && colorW < 0.15 * win.total && !(win.played && win.played.vec[special] > 0.5) ? COLOR_UNSUNG : 0;
+  return s / win.total + 0.25 * c.prior + fit - (c.tones.length > 3 ? 0.08 : 0) - unsung - (c.chromatic ? 0.05 : 0);
 }
 
 const FUNC_MOVES = { TS: 0.12, SD: 0.18, DT: 0.25, ST: 0.04, TD: 0.06, DS: -0.15, TT: -0.02, DD: 0.02, SS: 0 };
@@ -296,12 +354,20 @@ function transition(a, b) {
 // Viterbi search over the chord vocabulary: each window's chord should fit the
 // notes sung over it, and the sequence should move like a real progression.
 // Pass `tempo` only when its beat grid can be trusted (a count-in, or set by hand).
-export function harmonize(notes, key, { rhythm = 'medium', palette = 'triads', tempo = null } = {}) {
+// `played`: chroma from instrument layers whose chords should guide the choice.
+export function harmonize(notes, key, { rhythm = 'medium', palette = 'triads', tempo = null, played = [] } = {}) {
   const all = buildVocab(key);
   const vocab = choicesFor(all, palette);
   const scale = scalePcs(key);
   const ann = annotate(notes, tempo);
-  const wins = tempo ? makeGridWindows(ann, rhythm, tempo) : makeWindows(ann, rhythm);
+  // The harmony covers the melody and any stretch where an instrument plays on its own.
+  let t0 = notes[0].start, t1 = notes[notes.length - 1].end;
+  for (const src of played) {
+    const on = src.frames.map((f, i) => (f.some((v) => v > 0) ? src.t0 + i * src.hop : null)).filter((t) => t != null);
+    if (on.length) { t0 = Math.min(t0, on[0]); t1 = Math.max(t1, on[on.length - 1] + src.hop); }
+  }
+  const wins = (tempo ? makeGridWindows(ann, rhythm, tempo, [t0, t1]) : makeWindows(ann, rhythm, [t0, t1], changePoints(played)))
+    .map((w) => ({ ...w, played: playedOver(played, w.start, w.end) }));
   const E = wins.map((w) => vocab.map((c) => emission(c, w, scale)));
   const N = vocab.length, T = wins.length, TW = 0.4;
   const isTonic = (c) => c.deg === 0 && c.func === 'T';
@@ -310,7 +376,7 @@ export function harmonize(notes, key, { rhythm = 'medium', palette = 'triads', t
   const back = [];
   for (let t = 1; t < T; t++) {
     const cur = new Array(N), bp = new Array(N);
-    const empty = wins[t].total <= 1e-6;
+    const empty = wins[t].total <= 1e-6 && !wins[t].played;
     for (let j = 0; j < N; j++) {
       let best = -Infinity, bi = 0;
       for (let i = 0; i < N; i++) {

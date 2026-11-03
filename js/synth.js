@@ -63,7 +63,7 @@ export class Synth {
 
   _drop() {
     const old = this.ctx;
-    this.ctx = this.out = this.countOut = this.toneNodes = this.clickNoise = null;
+    this.ctx = this.out = this.countOut = this.toneNodes = this.clickNoise = this.drumNoise = null;
     this.sources.clear();
     old.close?.().catch(() => {});
   }
@@ -111,19 +111,27 @@ export class Synth {
     this.out = null;
   }
 
+  // A gain stage for one track of the mix, feeding the current playback's bus.
+  bus(level = 1) {
+    const g = this.ctx.createGain();
+    g.gain.value = level;
+    g.connect(this.out);
+    return g;
+  }
+
   _track(src) {
     this.sources.add(src);
     src.onended = () => this.sources.delete(src);
   }
 
-  _voice(midi, t, dur, gain, type, cutoff, detunes) {
+  _voice(midi, t, dur, gain, type, cutoff, detunes, dest = this.out) {
     const ctx = this.ctx;
     const env = ctx.createGain();
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
     filter.frequency.value = cutoff;
     filter.Q.value = 0.6;
-    filter.connect(env).connect(this.out);
+    filter.connect(env).connect(dest);
 
     env.gain.setValueAtTime(0, t);
     env.gain.linearRampToValueAtTime(gain, t + 0.06);
@@ -142,16 +150,16 @@ export class Synth {
     }
   }
 
-  chord(midis, t, dur, level = 0.8) {
+  chord(midis, t, dur, level = 0.8, dest = this.out) {
     const [bass, ...upper] = midis;
-    this._voice(bass, t, dur, 0.55 * level, 'triangle', 900, [0]);
-    for (const m of upper) this._voice(m, t, dur, (0.18 * level * 4) / Math.max(3, upper.length), 'sawtooth', 1500, [-7, 7]);
+    this._voice(bass, t, dur, 0.55 * level, 'triangle', 900, [0], dest);
+    for (const m of upper) this._voice(m, t, dur, (0.18 * level * 4) / Math.max(3, upper.length), 'sawtooth', 1500, [-7, 7], dest);
   }
 
-  lead(midi, t, dur) {
+  lead(midi, t, dur, dest = this.out) {
     const ctx = this.ctx;
     const env = ctx.createGain();
-    env.connect(this.out);
+    env.connect(dest);
     env.gain.setValueAtTime(0, t);
     env.gain.linearRampToValueAtTime(0.5, t + 0.015);
     env.gain.setTargetAtTime(0.35, t + 0.015, 0.2);
@@ -213,12 +221,12 @@ export class Synth {
     this._track(snap);
   }
 
-  // A short burst of decaying noise.
-  _noise(seconds) {
+  // A burst of white noise, fading out by `fade` (0 = steady, 2 = quickly).
+  _noise(seconds, fade = 2) {
     const len = Math.floor(this.ctx.sampleRate * seconds);
     const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
     const d = buf.getChannelData(0);
-    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len) ** 2;
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len) ** fade;
     return buf;
   }
 
@@ -265,13 +273,63 @@ export class Synth {
     }
   }
 
-  voice(buffer, t, offset, dur) {
+  voice(buffer, t, offset, dur, dest = this.out) {
     const src = this.ctx.createBufferSource();
     src.buffer = buffer;
-    const g = this.ctx.createGain();
-    g.gain.value = 1;
-    src.connect(g).connect(this.out);
+    src.connect(dest);
     src.start(t, offset, dur);
     this._track(src);
+  }
+
+  // A small synthesized kit for rhythm layers: kick (k), snare (s) and hi-hat (h),
+  // `vel` from 0 to 1.
+  drum(d, t, vel = 1, dest = this.out) {
+    const ctx = this.ctx;
+    const env = ctx.createGain();
+    env.connect(dest);
+    const a = 0.35 + 0.65 * vel;
+    this.drumNoise ??= this._noise(0.3, 0);
+    if (d === 'k') {
+      const osc = ctx.createOscillator();
+      osc.frequency.setValueAtTime(150, t);
+      osc.frequency.exponentialRampToValueAtTime(48, t + 0.12);
+      env.gain.setValueAtTime(1.1 * a, t);
+      env.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+      osc.connect(env);
+      osc.start(t);
+      osc.stop(t + 0.42);
+      this._track(osc);
+      return;
+    }
+    const noise = ctx.createBufferSource();
+    noise.buffer = this.drumNoise;
+    const f = ctx.createBiquadFilter();
+    if (d === 'h') {
+      f.type = 'highpass';
+      f.frequency.value = 7000;
+      env.gain.setValueAtTime(0.45 * a, t);
+      env.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
+    } else {
+      f.type = 'bandpass';
+      f.frequency.value = 1800;
+      f.Q.value = 0.7;
+      env.gain.setValueAtTime(0.9 * a, t);
+      env.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+      // The drum's body under the rattle
+      const body = ctx.createOscillator();
+      const bg = ctx.createGain();
+      body.type = 'triangle';
+      body.frequency.value = 190;
+      bg.gain.setValueAtTime(0.5 * a, t);
+      bg.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+      body.connect(bg).connect(dest);
+      body.start(t);
+      body.stop(t + 0.12);
+      this._track(body);
+    }
+    noise.connect(f).connect(env);
+    noise.start(t);
+    noise.stop(t + 0.3);
+    this._track(noise);
   }
 }

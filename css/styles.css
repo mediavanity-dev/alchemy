@@ -310,7 +310,6 @@ main { flex: 1; position: relative; overflow: hidden; }
 .roll.trim { touch-action: none; cursor: ew-resize; }
 .roll.editing { touch-action: none; border-color: var(--gold); }
 .harmony.editing > .chips, .harmony.editing > .controls, .harmony.editing > .melody { opacity: 0.3; pointer-events: none; }
-.harmony.editing .mode-seg { display: none; }
 .editing .rec-dot { display: none; }
 /* Narrow phones: the recording length is already shown under the key, so make room. */
 @media (max-width: 420px) { #rollInfo { display: none; } }
@@ -367,7 +366,6 @@ main { flex: 1; position: relative; overflow: hidden; }
 
 .harmony > * { transition: opacity 0.2s; }
 .harmony.trimming > :not(.roll):not(#trimBar):not(.transport):not(.key-card) { opacity: 0.3; pointer-events: none; }
-.harmony.trimming .mode-seg { display: none; }
 
 .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
 @media (max-width: 459px) { .controls { grid-template-columns: 1fr; } }
@@ -429,7 +427,6 @@ main { flex: 1; position: relative; overflow: hidden; }
   gap: 12px;
   background: linear-gradient(to bottom, transparent, var(--bg) 22px);
 }
-.mode-seg button { font-size: 12px; }
 .transport-status { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .rec-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--rose); animation: blink 1s ease-in-out infinite alternate; }
 .trimming .rec-dot { display: none; }
@@ -571,6 +568,26 @@ main { flex: 1; position: relative; overflow: hidden; }
 .icon-sm { min-width: 40px; height: 40px; padding: 0 8px; border-radius: 10px; display: grid; place-items: center; color: var(--faint); }
 .icon-sm svg { width: 18px; height: 18px; }
 .icon-sm.confirm { background: var(--rose); color: #fff; font-size: 13px; font-weight: 600; }
+
+/* Tracks sheet: the mix, one row per track */
+.track-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.track { padding: 6px 4px 6px 10px; border-radius: 14px; background: var(--surface); border: 1px solid var(--line); }
+.track-main { display: flex; align-items: center; gap: 10px; min-height: 44px; }
+.track-icon { flex: none; width: 26px; display: grid; place-items: center; color: var(--gold); }
+.track-icon svg { width: 20px; height: 20px; }
+.track-name { flex: 1; min-width: 0; }
+.track-name b { display: block; font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.track-name span { display: block; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.track.off .track-icon, .track.off .track-name, .track.off .track-vol { opacity: 0.45; }
+.track-vol { flex: none; width: 88px; accent-color: var(--gold); }
+.track-mute { flex: none; width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; color: var(--faint); }
+.track-mute.on { color: var(--text); }
+.track-mute svg { width: 20px; height: 20px; }
+.track-opts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 2px 36px; }
+.track-opts .icon-sm { margin-left: auto; }
+.kind-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 12px; border-radius: 999px; border: 1px dashed var(--line); font-size: 13px; color: var(--text); }
+.kind-chip svg { width: 15px; height: 15px; color: var(--gold); }
+.track-group { margin: 10px 4px 0; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 .btn .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--rose); margin-right: 10px; }
 
 .field { width: 100%; min-height: 50px; margin: 14px 0; padding: 0 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); color: var(--text); font: inherit; font-size: 16px; }

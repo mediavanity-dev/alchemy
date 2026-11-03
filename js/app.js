@@ -2,6 +2,7 @@ import { extractTrack, segmentNotes, livePitch, normalizeLoudness } from './pitc
 import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing, detectTempo, beatsBetween, rankChords, METERS, barBeats } from './theory.js';
 import { Synth } from './synth.js';
 import { tuneClip, targetFn } from './tune.js';
+import { analyze, chromaOf, hitsOf, normalizePeak } from './sound.js';
 import * as store from './db.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -19,7 +20,6 @@ const state = {
   keyIdx: 0,
   rhythm: 'medium',
   palette: 'triads',
-  mode: 'voice',
   harmony: null,
   overrides: {},
   playing: null,
@@ -605,8 +605,10 @@ function loadTake(take, saved = {}) {
   take.trim ??= { start: 0, end: take.duration };
   take.tune ??= { amount: 0, mode: 'chromatic' };
   take.tempo ??= detectTempo(take.notes);
+  take.mix = { ...defaultMix(), ...take.mix };
+  take.layers.forEach(prepareLayer);
   state.take = take;
-  state.keys = detectKeys(analysisNotes());
+  state.keys = detectKeys(analysisNotes(), playedSources());
   state.keyIdx = Math.min(saved.keyIdx ?? 0, state.keys.length - 1);
   state.rhythm = saved.rhythm ?? state.rhythm;
   state.palette = { simple: 'triads', rich: 'chromatic' }[saved.palette] ?? saved.palette ?? state.palette;
@@ -631,12 +633,12 @@ function refitSegment(seg) {
   seg.pcs = pcs;
 }
 
-// The notes the harmony is built from: the (trimmed) take plus any layers the user opted in.
-// Layers may run past the end of the take, so only the trim start bounds them.
+// The notes the harmony is built from: the (trimmed) take plus any melody layers the
+// user opted in. Layers may run past the end of the take, so only the trim start bounds them.
 function analysisNotes() {
   const { notes, layers, trim } = state.take;
   const extra = layers
-    .filter((l) => l.included)
+    .filter((l) => l.included && kindOf(l) === 'melody')
     .flatMap((l) => l.notes.filter((n) => n.start >= trim.start - 0.05));
   return [...notes, ...extra].sort((a, b) => a.start - b.start);
 }
@@ -649,7 +651,7 @@ function markDirty() {
 // or a tempo the user set. A detected tempo is a guess, so it isn't used.
 function harmonyOptions() {
   const t = state.take?.tempo;
-  return { rhythm: state.rhythm, palette: state.palette, tempo: t && (t.source === 'countin' || t.manual) ? t : null };
+  return { rhythm: state.rhythm, palette: state.palette, tempo: t && (t.source === 'countin' || t.manual) ? t : null, played: playedSources() };
 }
 
 function reharmonize() {
@@ -670,7 +672,7 @@ function regrid() {
 function reanalyze() {
   stopPlayback();
   retempo();
-  state.keys = detectKeys(analysisNotes());
+  state.keys = detectKeys(analysisNotes(), playedSources());
   state.keyIdx = 0;
   reharmonize();
   renderHarmony();
@@ -683,7 +685,11 @@ function retempo() {
   if (take.tempo?.source === 'countin') return;
   const manual = take.tempo?.manual ? take.tempo.bpm : null;
   const meter = take.tempo?.meter;
-  take.tempo = detectTempo(take.notes, manual);
+  // Drum hits are good evidence for where the beat is.
+  const hits = take.layers
+    .filter((l) => kindOf(l) === 'rhythm')
+    .flatMap((l) => l.hits.map((h) => ({ start: l.offset + h.t, end: l.offset + h.t + 0.1 })));
+  take.tempo = detectTempo([...take.notes, ...hits].sort((a, b) => a.start - b.start), manual);
   if (take.tempo && manual) take.tempo.manual = true;
   if (take.tempo && meter) take.tempo.meter = meter;
 }
@@ -789,7 +795,6 @@ function updateTransportStatus(text) {
   const msg = text ?? (state.trimming ? 'Play previews your selection' : state.editing ? 'Tap the chord bar to split a chord' : '');
   el.hidden = !msg;
   $('#transportStatusText').textContent = msg;
-  document.querySelector('.mode-seg').hidden = !!msg;
 }
 
 let rollGeom = null;
@@ -811,7 +816,7 @@ function drawRoll(playT = null) {
 
   const groups = [
     { notes: take.notes, style: 'base' },
-    ...take.layers.map((l) => ({ notes: l.notes, style: l.included ? 'layer' : 'ghost' })),
+    ...take.layers.filter((l) => kindOf(l) === 'melody').map((l) => ({ notes: l.notes, style: l.included ? 'layer' : 'ghost' })),
   ];
   let lo = Infinity, hi = -Infinity;
   for (const grp of groups) for (const n of grp.notes) if (inView(n)) { lo = Math.min(lo, n.midi); hi = Math.max(hi, n.midi); }
@@ -866,6 +871,35 @@ function drawRoll(playT = null) {
   g.beginPath();
   g.rect(left, 0, w - left - right, h);
   g.clip();
+
+  // Chords layers: the notes being played, as soft shading across their lanes
+  for (const l of take.layers) {
+    if (kindOf(l) !== 'chords' || !l.chroma) continue;
+    g.fillStyle = l.included ? cViolet : cFaint;
+    for (const b of chromaBlocks(l)) {
+      const bx0 = x(l.offset + b.t0), bx1 = x(l.offset + b.t1);
+      if (bx1 < left || bx0 > w - right) continue;
+      for (const [p, v] of b.pcs) {
+        g.globalAlpha = (l.included ? 0.14 : 0.08) + (v - 0.5) * 0.4;
+        for (let m = lo; m <= hi; m++) if (pc(m) === p) g.fillRect(bx0, laneY(m) + 1, bx1 - bx0 + 0.5, laneH - 2);
+      }
+    }
+  }
+  g.globalAlpha = 1;
+
+  // Rhythm layers: a tick per hit along the bottom, tallest for kicks
+  for (const l of take.layers) {
+    if (kindOf(l) !== 'rhythm' || !l.hits) continue;
+    g.fillStyle = l.muted ? cFaint : cViolet;
+    for (const hit of l.hits) {
+      const tx = x(l.offset + hit.t);
+      if (tx < left || tx > w - right) continue;
+      const th = hit.d === 'k' ? 11 : hit.d === 's' ? 7 : 4;
+      g.globalAlpha = 0.4 + 0.6 * hit.s;
+      g.fillRect(Math.round(tx), top + rollH - th, 2, th);
+    }
+  }
+  g.globalAlpha = 1;
 
   // Raw pitch trace of the original take
   g.strokeStyle = cViolet;
@@ -1148,7 +1182,7 @@ function rollPoint(e) {
 function noteAt(px, py) {
   const take = state.take;
   const G = rollGeom;
-  const notes = [...take.notes, ...take.layers.filter((l) => l.included).flatMap((l) => l.notes)];
+  const notes = [...take.notes, ...take.layers.filter((l) => l.included && kindOf(l) === 'melody').flatMap((l) => l.notes)];
   let best = null, bestD = Infinity;
   for (const n of notes) {
     const x0 = G.x(n.start) - 4, x1 = G.x(n.end) + 4;
@@ -1281,11 +1315,11 @@ function bufferFor(clip) {
 }
 
 // Plays the part of a clip (placed at clipStart on the take timeline) that falls in [start, end].
-function scheduleClip(clip, clipStart, t0, start, end) {
+function scheduleClip(clip, clipStart, t0, start, end, dest) {
   const buf = bufferFor(clip);
   const a = Math.max(start, clipStart);
   const b = Math.min(end, clipStart + buf.duration);
-  if (b > a) synth.voice(buf, t0 + (a - start), a - clipStart, b - a);
+  if (b > a) synth.voice(buf, t0 + (a - start), a - clipStart, b - a, dest);
 }
 
 function startPlayback() {
@@ -1296,25 +1330,38 @@ function startPlayback() {
   const { start, end } = state.trimming ?? takeRange();
   const t0 = ctx.currentTime + 0.1;
 
+  const buses = {};
   if (state.trimming) {
     scheduleClip(take, 0, t0, start, end);
   } else {
-    const level = { chords: 1, melody: 0.7, voice: 0.55 }[state.mode];
-    for (const s of resolvedSegments()) synth.chord(voicing(s.chord), t0 + s.start - start, s.end - s.start, level);
-    if (state.mode === 'voice') {
-      scheduleClip(voiceClip(take), 0, t0, start, end);
-      for (const l of take.layers) if (!l.muted) scheduleClip(voiceClip(l), l.offset, t0, start, end);
+    // Every track is scheduled into its own gain stage, muted ones at zero, so the
+    // mix can change while it plays.
+    const bus = (id) => {
+      const t = track(id);
+      return (buses[id] = synth.bus(t.on ? t.vol : 0));
+    };
+    const backing = bus('backing');
+    for (const s of resolvedSegments()) synth.chord(voicing(s.chord), t0 + s.start - start, s.end - s.start, 1, backing);
+    scheduleClip(voiceClip(take), 0, t0, start, end, bus('take'));
+    for (const l of take.layers) {
+      const b = bus(l.id);
+      if (kindOf(l) === 'rhythm' && l.sound === 'kit') {
+        for (const h of l.hits) {
+          const at = l.offset + h.t;
+          if (at >= start && at < end) synth.drum(h.d, t0 + at - start, h.s, b);
+        }
+      } else scheduleClip(voiceClip(l), l.offset, t0, start, end, b);
     }
-    if (state.mode === 'melody') {
-      for (const n of analysisNotes()) if (n.start >= start && n.start < end) synth.lead(n.midi, t0 + n.start - start, n.end - n.start);
-    }
-    if (state.metronome && take.tempo) {
+    const guide = bus('guide');
+    for (const n of analysisNotes()) if (n.start >= start && n.start < end) synth.lead(n.midi, t0 + n.start - start, n.end - n.start, guide);
+    if (take.tempo) {
+      const click = bus('click');
       // While recording a layer the click keeps going past the end of the take.
       const clickEnd = layerRec ? start + MAX_LAYER_SECONDS : end;
-      for (const b of beatsBetween(take.tempo, start, clickEnd)) synth.click(t0 + b.t - start, b.accent);
+      for (const b of beatsBetween(take.tempo, start, clickEnd)) synth.click(t0 + b.t - start, b.accent, click);
     }
   }
-  state.playing = { t0, start, end, viewEnd: end, raf: 0, seg: -1 };
+  state.playing = { t0, start, end, viewEnd: end, raf: 0, seg: -1, buses };
   $('#playBtn').classList.add('playing');
   $('#playBtn').setAttribute('aria-label', 'Stop');
   tick();
@@ -1414,23 +1461,30 @@ async function stopLayer() {
     toast('That layer was too short to keep.');
     return;
   }
-  const samples = normalizeLoudness(concat(r.chunks, r.length), r.mic.sr);
+  const raw = concat(r.chunks, r.length);
   // Where the first recorded sample sits on the take's timeline, minus the
   // round trip from speaker to ear to mic.
   const offset = r.play.start + (r.firstTime - r.play.t0) - outLatency - r.mic.latency;
 
   setProcessing(true, 0.1);
   await nextFrame();
-  const track = await extractTrack(samples, r.mic.sr, (p) => setProcessing(true, 0.1 + p * 0.85));
+  const forPitch = normalizeLoudness(raw.slice(), r.mic.sr);
+  const track = await extractTrack(forPitch, r.mic.sr, (p) => setProcessing(true, 0.1 + p * 0.75));
   const seg = segmentNotes(track);
+  setProcessing(true, 0.9);
+  await nextFrame();
+  const sound = analyze(raw, r.mic.sr, track);
   setProcessing(false);
+  const kind = sound.kind;
 
-  state.take.layers.push({
+  const layer = {
     id: uid(),
     name: r.name,
-    samples,
+    // Singing is levelled by loudness; struck and strummed sounds by their peaks,
+    // so their attacks stay intact.
+    samples: kind === 'melody' ? forPitch : normalizePeak(raw),
     sampleRate: r.mic.sr,
-    duration: samples.length / r.mic.sr,
+    duration: raw.length / r.mic.sr,
     offset,
     notes: seg.notes.map((n) => ({ ...n, start: n.start + offset, end: n.end + offset })),
     // Pitch contour in the layer's own time, for tuning it later
@@ -1438,71 +1492,223 @@ async function stopLayer() {
     traceT0: seg.traceT0,
     hop: seg.hop,
     traceOffset: seg.offset,
+    kind,
+    kindAuto: kind,
+    chroma: sound.chroma,
+    hits: sound.hits,
+    sound: 'original',
+    volume: 1,
     muted: false,
     included: false,
-  });
+  };
+  const take = state.take;
+  take.layers.push(layer);
+  if (kind === 'rhythm' && take.tempo?.source !== 'countin' && !take.tempo?.manual) retempo();
   markDirty();
   renderHarmony();
-  toast(`${r.name} added. Turn on Harmony in Layers to include it.`, 4200);
+  toast({
+    melody: `${r.name} added as a melody. Turn on Harmony in Tracks to use it for the chords.`,
+    chords: `${r.name} sounds like chords. Turn on Harmony in Tracks to let them guide the progression.`,
+    rhythm: `${r.name} sounds like rhythm (${sound.hits.length} hits). Try Drum kit in Tracks.`,
+  }[kind], 4600);
   haptic([8, 40, 8]);
 }
 
-$('#layersBtn').addEventListener('click', openLayersSheet);
+/* ---------- sound kinds and the mix ---------- */
 
-function openLayersSheet() {
+const ICON = {
+  take: '<path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/>',
+  melody: '<path d="M12 18V4l6 2.5"/><circle cx="9" cy="18" r="3"/>',
+  chords: '<path d="M16 3.5v13"/><ellipse cx="12.5" cy="17" rx="3.5" ry="2.4"/><ellipse cx="12.5" cy="12" rx="3.5" ry="2.4"/><ellipse cx="12.5" cy="7" rx="3.5" ry="2.4"/>',
+  rhythm: '<ellipse cx="12" cy="10" rx="8" ry="3"/><path d="M4 10v5.5c0 1.7 3.6 3 8 3s8-1.3 8-3V10M8.5 3.5l3 5M15.5 3.5l-3 5"/>',
+  backing: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7.5 5v8.5M12 5v8.5M16.5 5v8.5"/>',
+  guide: '<path d="M3 12c2-6 4-6 6 0s4 6 6 0 4-6 6 0"/>',
+  click: '<path d="M9 3h6l3.5 18h-13zM12 15l5-9M7 16h10"/>',
+  on: '<path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/>',
+  off: '<path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M17 9.5l5 5M22 9.5l-5 5"/>',
+};
+const icon = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICON[name]}</svg>`;
+
+const KINDS = { melody: 'Melody', chords: 'Chords', rhythm: 'Rhythm' };
+const KIND_ORDER = ['melody', 'chords', 'rhythm'];
+const kindOf = (l) => l.kind ?? 'melody';
+
+// Fills in what a layer's kind needs: for older saves, or after its kind changes.
+function prepareLayer(l) {
+  l.kind ??= 'melody';
+  l.volume ??= 1;
+  l.sound ??= 'original';
+  if (l.kind === 'rhythm') l.included = false;
+  if (l.kind === 'chords' && !l.chroma) l.chroma = chromaOf(l.samples, l.sampleRate);
+  if (l.kind === 'rhythm' && !l.hits) l.hits = hitsOf(l.samples, l.sampleRate);
+}
+
+// Chroma of the chord layers the user opted into the harmony, on the take's timeline.
+function playedSources() {
+  const { layers, trim } = state.take;
+  return layers
+    .filter((l) => l.included && kindOf(l) === 'chords' && l.chroma)
+    .map((l) => {
+      const t0 = l.offset + l.chroma.t0, hop = l.chroma.hop;
+      const empty = new Float32Array(12);
+      return { t0, hop, frames: l.chroma.frames.map((f, i) => (t0 + i * hop < trim.start - 0.05 ? empty : f)) };
+    });
+}
+
+// A chord layer's chroma averaged into quarter-second blocks, for drawing.
+function chromaBlocks(l) {
+  if (l.blocks) return l.blocks;
+  const { t0, hop, frames } = l.chroma;
+  const per = Math.max(1, Math.round(0.25 / hop));
+  l.blocks = [];
+  for (let i = 0; i < frames.length; i += per) {
+    const v = new Float32Array(12);
+    let n = 0;
+    for (let j = i; j < Math.min(frames.length, i + per); j++) {
+      if (!frames[j].some((x) => x > 0)) continue;
+      n++;
+      for (let k = 0; k < 12; k++) v[k] += frames[j][k];
+    }
+    if (!n) continue;
+    const mx = Math.max(...v);
+    l.blocks.push({ t0: t0 + (i - 0.5) * hop, t1: t0 + (i + per - 0.5) * hop, pcs: [...v].map((x, k) => [k, x / mx]).filter(([, x]) => x > 0.5) });
+  }
+  return l.blocks;
+}
+
+const defaultMix = () => ({ take: { on: true, vol: 1 }, backing: { on: true, vol: 0.6 }, guide: { on: false, vol: 0.7 }, click: { vol: 0.8 } });
+
+// A track of the mix: 'take', 'backing', 'guide', 'click' or a layer id.
+function track(id) {
+  const take = state.take;
+  if (id === 'click') return { on: state.metronome, vol: take.mix.click.vol };
+  const l = take.layers.find((x) => x.id === id);
+  return l ? { on: !l.muted, vol: l.volume } : take.mix[id];
+}
+
+function setTrack(id, patch) {
+  const take = state.take;
+  const l = take.layers.find((x) => x.id === id);
+  if (id === 'click') {
+    if ('on' in patch) state.metronome = patch.on;
+    if ('vol' in patch) take.mix.click.vol = patch.vol;
+  } else if (l) {
+    if ('on' in patch) l.muted = !patch.on;
+    if ('vol' in patch) l.volume = patch.vol;
+  } else Object.assign(take.mix[id], patch);
+  // Live, without restarting playback
+  const b = state.playing?.buses?.[id];
+  if (b) {
+    const t = track(id);
+    b.gain.setTargetAtTime(t.on ? t.vol : 0, synth.ctx.currentTime, 0.03);
+  }
+  if (id !== 'click') markDirty();
+}
+
+$('#layersBtn').addEventListener('click', openTracksSheet);
+
+function openTracksSheet() {
   const take = state.take;
   const check = '<span class="chk"></span>';
-  const rows = take.layers
-    .map((l) => `
-      <div class="layer-row" data-id="${l.id}">
-        <div class="layer-top">
-          <div class="layer-name"><b>${esc(l.name)}</b><span>${l.notes.length} notes · ${fmtTime(l.duration)}</span></div>
-          <button class="icon-sm" data-act="delete" aria-label="Delete ${esc(l.name)}">${trashIcon}</button>
-        </div>
-        <div class="layer-toggles">
-          <button class="pill ${l.muted ? '' : 'on'}" data-act="mute" aria-pressed="${!l.muted}">${check}Play</button>
-          <button class="pill ${l.included ? 'on' : ''}" data-act="include" aria-pressed="${l.included}">${check}Harmony</button>
-        </div>
-      </div>`)
-    .join('');
+  const row = (id, ic, name, sub, opts = '') => {
+    const t = track(id);
+    return `<div class="track ${t.on ? '' : 'off'}" data-track="${id}">
+      <div class="track-main">
+        <span class="track-icon">${icon(ic)}</span>
+        <div class="track-name"><b>${esc(name)}</b><span>${sub}</span></div>
+        <input class="track-vol" type="range" min="0" max="1" step="0.01" value="${t.vol}" aria-label="${esc(name)} volume">
+        <button class="track-mute ${t.on ? 'on' : ''}" data-act="mute" aria-pressed="${t.on}" aria-label="${esc(name)}: ${t.on ? 'playing' : 'muted'}">${icon(t.on ? 'on' : 'off')}</button>
+      </div>${opts}
+    </div>`;
+  };
+  const layerRow = (l) => {
+    const kind = kindOf(l);
+    const sub = kind === 'melody' ? `${l.notes.length} notes · ${fmtTime(l.duration)}`
+      : kind === 'rhythm' ? `${l.hits.length} hits · ${fmtTime(l.duration)}`
+      : fmtTime(l.duration);
+    const extra = kind === 'rhythm'
+      ? `<button class="pill ${l.sound === 'kit' ? 'on' : ''}" data-act="kit" aria-pressed="${l.sound === 'kit'}">${check}Drum kit</button>`
+      : `<button class="pill ${l.included ? 'on' : ''}" data-act="include" aria-pressed="${l.included}">${check}Harmony</button>`;
+    return row(l.id, kind, l.name, sub, `
+      <div class="track-opts">
+        <button class="kind-chip" data-act="kind" aria-label="${KINDS[kind]}. Tap to change what kind of sound this is.">${icon(kind)}${KINDS[kind]}</button>
+        ${extra}
+        <button class="icon-sm" data-act="delete" aria-label="Delete ${esc(l.name)}">${trashIcon}</button>
+      </div>`);
+  };
   const full = take.layers.length >= MAX_LAYERS;
 
-  openSheet(`
-    <h3>Layers</h3>
-    <p class="sub">Sing more parts over your take, ideally with headphones so the playback stays out of the mic. Keep going past the end if you like; recording runs until you tap stop. A new layer only changes the key and chords once you turn on <b>Harmony</b>.</p>
-    <div class="layer-list">${rows || '<div class="layer-empty">No layers yet</div>'}</div>
-    <button class="btn primary block" id="layerRecord" ${full ? 'disabled' : ''}><span class="dot"></span>${full ? 'Layer limit reached' : 'Record a layer'}</button>`);
+  openSheet(`<div class="tracks-sheet">
+    <h3>Tracks</h3>
+    <p class="sub">Record more parts over your take: sing, play an instrument, or tap out a beat. Alchemy works out which it is; tap the label to change it. Headphones keep the playback out of the mic.</p>
+    <div class="track-list">
+      ${row('take', 'take', 'Your take', `Melody · ${fmtTime(take.duration)}`)}
+      ${take.layers.map(layerRow).join('')}
+      <div class="track-group">Backing</div>
+      ${row('backing', 'backing', 'Chords', 'The progression')}
+      ${row('guide', 'guide', 'Guide melody', 'Your notes, played clean')}
+      ${take.tempo ? row('click', 'click', 'Click', `${Math.round(take.tempo.bpm)} bpm`) : ''}
+    </div>
+    <button class="btn primary block" id="layerRecord" ${full ? 'disabled' : ''}><span class="dot"></span>${full ? 'Layer limit reached' : 'Record a layer'}</button>
+  </div>`);
 
+  const body = $('#sheetBody .tracks-sheet');
   $('#layerRecord').addEventListener('click', startLayer);
-  $('#sheetBody .layer-list').addEventListener('click', (e) => {
+  body.addEventListener('input', (e) => {
+    if (!e.target.classList.contains('track-vol')) return;
+    setTrack(e.target.closest('.track').dataset.track, { vol: +e.target.value });
+  });
+  body.addEventListener('click', (e) => {
     const b = e.target.closest('[data-act]');
     if (!b) return;
-    const id = b.closest('.layer-row').dataset.id;
+    const id = b.closest('.track').dataset.track;
     const layer = take.layers.find((l) => l.id === id);
-    if (b.dataset.act === 'mute') {
-      layer.muted = !layer.muted;
-      markDirty();
-    } else if (b.dataset.act === 'include') {
-      if (!layer.included && !layer.notes.length) {
-        toast(`No clear notes in ${layer.name} to harmonize.`);
+    const act = b.dataset.act;
+    if (act === 'mute') {
+      const on = !track(id).on;
+      if (id === 'click') setMetronome(on);
+      else setTrack(id, { on });
+    } else if (act === 'include') {
+      const kind = kindOf(layer);
+      const usable = kind === 'chords' ? layer.chroma.frames.some((f) => f.some((v) => v > 0)) : layer.notes.length > 0;
+      if (!layer.included && !usable) {
+        toast(kind === 'chords' ? `Couldn't hear clear chords in ${layer.name}.` : `No clear notes in ${layer.name} to harmonize.`);
         return;
       }
       layer.included = !layer.included;
       reanalyze();
       toast(`Harmony updated ${layer.included ? 'with' : 'without'} ${layer.name}`);
-    } else if (b.dataset.act === 'delete') {
+    } else if (act === 'kind') {
+      const prev = kindOf(layer);
+      const next = KIND_ORDER[(KIND_ORDER.indexOf(prev) + 1) % KIND_ORDER.length];
+      const wasIncluded = layer.included;
+      layer.kind = next;
+      prepareLayer(layer);
+      stopPlayback();
+      markDirty();
+      if (prev === 'rhythm' || next === 'rhythm') retempo();
+      if (wasIncluded) reanalyze();
+      else renderHarmony();
+      toast(`${layer.name} treated as ${KINDS[next].toLowerCase()}${next === layer.kindAuto ? ', as first detected' : ''}.`);
+    } else if (act === 'kit') {
+      layer.sound = layer.sound === 'kit' ? 'original' : 'kit';
+      markDirty();
+      if (state.playing && !layerRec) startPlayback();
+      toast(layer.sound === 'kit' ? `${layer.name} plays as a drum kit.` : `${layer.name} plays as recorded.`);
+    } else if (act === 'delete') {
       if (!b.classList.contains('confirm')) {
         b.classList.add('confirm');
         b.textContent = 'Delete';
         return;
       }
       take.layers = take.layers.filter((l) => l !== layer);
+      stopPlayback();
       markDirty();
       if (layer.included) reanalyze();
       else renderHarmony();
-    }
+    } else return;
     haptic();
-    openLayersSheet();
+    openTracksSheet();
   });
 }
 
@@ -1523,7 +1729,7 @@ function voiceClip(clip) {
   const { amount, mode } = take.tune;
   const isBase = clip === take;
   const tuning = isBase ? take.traceOffset ?? take.offset : clip.traceOffset;
-  if (!amount || !clip.trace || tuning == null) return clip;
+  if (!amount || !clip.trace || tuning == null || (!isBase && kindOf(clip) !== 'melody')) return clip;
 
   const key = state.keys[state.keyIdx];
   const notes = isBase ? take.notes : clip.notes.map((n) => ({ ...n, start: n.start - clip.offset, end: n.end - clip.offset }));
@@ -1564,8 +1770,7 @@ function openTuneSheet() {
     if (!b) return;
     if (b.id === 'tuneListen') {
       closeSheet();
-      state.mode = 'voice';
-      renderHarmony();
+      if (!track('take').on) setTrack('take', { on: true });
       startPlayback();
       return;
     }
@@ -1608,10 +1813,8 @@ function openTuneSheet() {
 })();
 
 function setMetronome(on) {
-  state.metronome = on;
-  const wasPlaying = !!state.playing && !layerRec;
+  setTrack('click', { on });
   renderHarmony();
-  if (wasPlaying) startPlayback();
   haptic();
 }
 
@@ -1863,7 +2066,9 @@ async function saveTake(name) {
     tempo: take.tempo,
     tune: take.tune,
     traceOffset: take.traceOffset,
-    layers: take.layers.map(({ samples, buffer, bufferCtx, tuned, ...rest }) => rest),
+    // Chroma and drawing caches are rebuilt from the audio when the take is opened.
+    layers: take.layers.map(({ samples, buffer, bufferCtx, tuned, chroma, blocks, ...rest }) => rest),
+    mix: take.mix,
     keyIdx: state.keyIdx,
     rhythm: state.rhythm,
     palette: state.palette,
