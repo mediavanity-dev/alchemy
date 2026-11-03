@@ -22,22 +22,31 @@ export class Synth {
   ensure() {
     if (!this.ctx) {
       const AC = window.AudioContext || window.webkitAudioContext;
-      const ctx = (this.ctx = new AC({ latencyHint: 'interactive' }));
-      const comp = ctx.createDynamicsCompressor();
-      comp.threshold.value = -14;
-      comp.ratio.value = 4;
-      comp.connect(ctx.destination);
-      this.master = ctx.createGain();
-      this.master.gain.value = 0.9;
-      this.master.connect(comp);
-      const verb = ctx.createConvolver();
-      verb.buffer = makeImpulse(ctx);
-      this.reverb = ctx.createGain();
-      this.reverb.gain.value = 0.22;
-      this.reverb.connect(verb).connect(this.master);
+      this.attach(new AC({ latencyHint: 'interactive' }));
     }
     if (this.ctx.state === 'suspended') this.ctx.resume();
     return this.ctx;
+  }
+
+  // Builds the output chain on a context (a live one, or an offline one for measuring levels).
+  attach(ctx) {
+    this.ctx = ctx;
+    // A fast, hard-kneed limiter: transparent at normal levels, it only catches
+    // peaks so the mix can sit loud on a phone speaker without clipping.
+    const limiter = ctx.createDynamicsCompressor();
+    limiter.threshold.value = -3;
+    limiter.knee.value = 0;
+    limiter.ratio.value = 20;
+    limiter.attack.value = 0.002;
+    limiter.release.value = 0.2;
+    limiter.connect(ctx.destination);
+    this.master = ctx.createGain();
+    this.master.connect(limiter);
+    const verb = ctx.createConvolver();
+    verb.buffer = makeImpulse(ctx);
+    this.reverb = ctx.createGain();
+    this.reverb.gain.value = 0.22;
+    this.reverb.connect(verb).connect(this.master);
   }
 
   // Each playback gets its own output bus so stopping can fade it out cleanly.
@@ -95,8 +104,8 @@ export class Synth {
 
   chord(midis, t, dur, level = 0.8) {
     const [bass, ...upper] = midis;
-    this._voice(bass, t, dur, 0.22 * level, 'triangle', 900, [0]);
-    for (const m of upper) this._voice(m, t, dur, (0.07 * level * 4) / Math.max(3, upper.length), 'sawtooth', 1500, [-7, 7]);
+    this._voice(bass, t, dur, 0.55 * level, 'triangle', 900, [0]);
+    for (const m of upper) this._voice(m, t, dur, (0.18 * level * 4) / Math.max(3, upper.length), 'sawtooth', 1500, [-7, 7]);
   }
 
   lead(midi, t, dur) {
@@ -104,8 +113,8 @@ export class Synth {
     const env = ctx.createGain();
     env.connect(this.out);
     env.gain.setValueAtTime(0, t);
-    env.gain.linearRampToValueAtTime(0.2, t + 0.015);
-    env.gain.setTargetAtTime(0.14, t + 0.015, 0.2);
+    env.gain.linearRampToValueAtTime(0.5, t + 0.015);
+    env.gain.setTargetAtTime(0.35, t + 0.015, 0.2);
     env.gain.setTargetAtTime(0, t + dur, 0.05);
     const osc = ctx.createOscillator();
     osc.type = 'triangle';
@@ -121,7 +130,7 @@ export class Synth {
     const ctx = this.ctx;
     const env = ctx.createGain();
     env.connect(this.out);
-    env.gain.setValueAtTime(accent ? 0.32 : 0.2, t);
+    env.gain.setValueAtTime(accent ? 0.7 : 0.45, t);
     env.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
     const osc = ctx.createOscillator();
     osc.type = 'sine';
@@ -141,8 +150,8 @@ export class Synth {
     const env = ctx.createGain();
     env.connect(this.master);
     env.gain.setValueAtTime(0, t);
-    env.gain.linearRampToValueAtTime(0.28, t + 0.04);
-    env.gain.setValueAtTime(0.28, t + dur - 0.7);
+    env.gain.linearRampToValueAtTime(0.7, t + 0.04);
+    env.gain.setValueAtTime(0.7, t + dur - 0.7);
     env.gain.linearRampToValueAtTime(0, t + dur);
     const oscs = [[1, 1], [2, 0.12], [3, 0.04]].map(([h, g]) => {
       const osc = ctx.createOscillator();

@@ -1,6 +1,7 @@
-import { extractTrack, segmentNotes, livePitch } from './pitch.js';
+import { extractTrack, segmentNotes, livePitch, normalizeLoudness } from './pitch.js';
 import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing, detectTempo, beatsBetween } from './theory.js';
 import { Synth } from './synth.js';
+import { tuneClip, targetFn } from './tune.js';
 import * as store from './db.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -76,14 +77,10 @@ function concat(chunks, length) {
   return out;
 }
 
-function normalize(samples) {
-  let peak = 0;
-  for (let i = 0; i < samples.length; i++) peak = Math.max(peak, Math.abs(samples[i]));
-  if (peak > 0.001) {
-    const k = 0.9 / peak;
-    for (let i = 0; i < samples.length; i++) samples[i] *= k;
-  }
-  return samples;
+// iOS routes web audio at quiet "call" volume while a mic is open, and mutes it
+// with the ringer switch unless told this is media playback.
+function setAudioSession(type) {
+  try { if (navigator.audioSession) navigator.audioSession.type = type; } catch { /* unsupported */ }
 }
 
 function setProcessing(on, progress = 0) {
@@ -99,12 +96,14 @@ let workletReady = false;
 async function openMic(onChunk) {
   if (!navigator.mediaDevices?.getUserMedia) throw new Error('Recording needs a secure (https) connection.');
   const ctx = synth.ensure();
+  setAudioSession('play-and-record');
   let stream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true },
     });
   } catch {
+    setAudioSession('playback');
     throw new Error('Alchemy needs microphone access to hear you.');
   }
   const source = ctx.createMediaStreamSource(stream);
@@ -135,6 +134,7 @@ async function openMic(onChunk) {
       node.disconnect();
       sink.disconnect();
       stream.getTracks().forEach((t) => t.stop());
+      setAudioSession('playback');
     },
   };
 }
@@ -358,7 +358,7 @@ $('#demoBtn').addEventListener('click', () => {
 async function processAudio(samples, sampleRate, name) {
   setProcessing(true, 0.05);
   await nextFrame();
-  normalize(samples);
+  normalizeLoudness(samples, sampleRate);
 
   const track = await extractTrack(samples, sampleRate, (p) => setProcessing(true, 0.05 + p * 0.85));
   const { notes, offset, trace, traceT0, hop } = segmentNotes(track);
@@ -380,6 +380,7 @@ async function processAudio(samples, sampleRate, name) {
     samples,
     duration,
     notes, offset, trace, traceT0, hop,
+    traceOffset: offset,
     track,
     trim: { start: 0, end: duration },
     layers: [],
@@ -393,6 +394,7 @@ function loadTake(take, saved = {}) {
   state.trimming = null;
   take.layers ??= [];
   take.trim ??= { start: 0, end: take.duration };
+  take.tune ??= { amount: 0, mode: 'chromatic' };
   take.tempo ??= detectTempo(take.notes);
   state.take = take;
   state.keys = detectKeys(analysisNotes());
@@ -521,7 +523,10 @@ function renderHarmony() {
     })
     .join('');
   const off = take.offset;
-  $('#tuningHint').textContent = Math.abs(off) < 8 ? 'You sang right in tune' : `You sang ${Math.abs(off)}¢ ${off > 0 ? 'sharp' : 'flat'} of A440`;
+  $('#tuningHint').textContent = Math.abs(off) < 8 ? 'In tune with A440' : `${Math.abs(off)}¢ ${off > 0 ? 'sharp' : 'flat'} of A440`;
+  const tuneLevel = TUNE_LEVELS.find((l) => l.amount === take.tune.amount);
+  $('#tuneLabel').textContent = take.tune.amount ? `Tuned · ${tuneLevel?.label ?? ''}` : 'Tune';
+  $('#tuneBtn').classList.toggle('strong', !!take.tune.amount);
 
   updateTransportStatus();
   $('#saveBtn').classList.toggle('saved', !!take.id && !take.dirty);
@@ -823,11 +828,11 @@ function startPlayback() {
   if (state.trimming) {
     scheduleClip(take, 0, t0, start, end);
   } else {
-    const level = state.mode === 'chords' ? 1 : 0.7;
+    const level = { chords: 1, melody: 0.7, voice: 0.55 }[state.mode];
     for (const s of resolvedSegments()) synth.chord(voicing(s.chord), t0 + s.start - start, s.end - s.start, level);
     if (state.mode === 'voice') {
-      scheduleClip(take, 0, t0, start, end);
-      for (const l of take.layers) if (!l.muted) scheduleClip(l, l.offset, t0, start, end);
+      scheduleClip(voiceClip(take), 0, t0, start, end);
+      for (const l of take.layers) if (!l.muted) scheduleClip(voiceClip(l), l.offset, t0, start, end);
     }
     if (state.mode === 'melody') {
       for (const n of analysisNotes()) if (n.start >= start && n.start < end) synth.lead(n.midi, t0 + n.start - start, n.end - n.start);
@@ -938,7 +943,7 @@ async function stopLayer() {
     toast('That layer was too short to keep.');
     return;
   }
-  const samples = normalize(concat(r.chunks, r.length));
+  const samples = normalizeLoudness(concat(r.chunks, r.length), r.mic.sr);
   // Where the first recorded sample sits on the take's timeline, minus the
   // round trip from speaker to ear to mic.
   const offset = r.play.start + (r.firstTime - r.play.t0) - outLatency - r.mic.latency;
@@ -957,6 +962,11 @@ async function stopLayer() {
     duration: samples.length / r.mic.sr,
     offset,
     notes: seg.notes.map((n) => ({ ...n, start: n.start + offset, end: n.end + offset })),
+    // Pitch contour in the layer's own time, for tuning it later
+    trace: seg.trace,
+    traceT0: seg.traceT0,
+    hop: seg.hop,
+    traceOffset: seg.offset,
     muted: false,
     included: false,
   });
@@ -1022,6 +1032,82 @@ function openLayersSheet() {
     }
     haptic();
     openLayersSheet();
+  });
+}
+
+/* ---------- voice tuning ---------- */
+
+const TUNE_LEVELS = [
+  { amount: 0, label: 'Off' },
+  { amount: 0.3, label: 'Light' },
+  { amount: 0.55, label: 'Medium' },
+  { amount: 0.8, label: 'Strong' },
+  { amount: 1, label: 'Hard' },
+];
+
+// The audio to play for a voice clip (the take or a layer): the original, or a
+// pitch-corrected copy built on demand and kept until the settings change.
+function voiceClip(clip) {
+  const take = state.take;
+  const { amount, mode } = take.tune;
+  const isBase = clip === take;
+  const tuning = isBase ? take.traceOffset ?? take.offset : clip.traceOffset;
+  if (!amount || !clip.trace || tuning == null) return clip;
+
+  const key = state.keys[state.keyIdx];
+  const notes = isBase ? take.notes : clip.notes.map((n) => ({ ...n, start: n.start - clip.offset, end: n.end - clip.offset }));
+  const sig = [amount, mode, mode === 'key' ? `${key.tonic}${key.mode}` : '', notes.length, notes[0]?.start, notes[notes.length - 1]?.end].join('|');
+  if (clip.tuned?.sig !== sig) {
+    const samples = tuneClip(
+      { samples: clip.samples, sampleRate: clip.sampleRate, trace: clip.trace, traceT0: clip.traceT0, hop: clip.hop, tuning: tuning / 100, notes },
+      { amount, targetOf: targetFn(mode, scalePcs(key)) }
+    );
+    clip.tuned = { sig, samples, sampleRate: clip.sampleRate };
+  }
+  return clip.tuned;
+}
+
+$('#tuneBtn').addEventListener('click', openTuneSheet);
+
+function openTuneSheet() {
+  const take = state.take;
+  const key = state.keys[state.keyIdx];
+  const { amount, mode } = take.tune;
+  openSheet(`<div class="tune-sheet">
+    <h3>Tune voice</h3>
+    <p class="sub">Pulls your singing toward the nearest note. Lighter settings keep your slides and vibrato; Hard gives the classic flat, robotic sound. Your original recording is kept, so you can change this any time.</p>
+    <span class="label">Amount</span>
+    <div class="seg" role="group" aria-label="Amount">
+      ${TUNE_LEVELS.map((l) => `<button data-amount="${l.amount}" class="${l.amount === amount ? 'active' : ''}">${l.label}</button>`).join('')}
+    </div>
+    <span class="label">Snap to</span>
+    <div class="seg" role="group" aria-label="Snap to">
+      <button data-mode="chromatic" class="${mode === 'chromatic' ? 'active' : ''}">Nearest note</button>
+      <button data-mode="key" class="${mode === 'key' ? 'active' : ''}">Notes in ${keyName(key)}</button>
+    </div>
+    <button class="btn primary block tune-listen" id="tuneListen">Listen</button>
+    </div>`);
+
+  $('#sheetBody .tune-sheet').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.id === 'tuneListen') {
+      closeSheet();
+      state.mode = 'voice';
+      renderHarmony();
+      startPlayback();
+      return;
+    }
+    if (b.dataset.amount != null) take.tune = { ...take.tune, amount: +b.dataset.amount };
+    else if (b.dataset.mode) take.tune = { ...take.tune, mode: b.dataset.mode };
+    else return;
+    markDirty();
+    const wasPlaying = !!state.playing && !layerRec;
+    stopPlayback();
+    renderHarmony();
+    openTuneSheet();
+    if (wasPlaying) startPlayback();
+    haptic();
   });
 }
 
@@ -1262,7 +1348,9 @@ async function saveTake(name) {
     hop: take.hop,
     trim: take.trim,
     tempo: take.tempo,
-    layers: take.layers.map(({ samples, buffer, ...rest }) => rest),
+    tune: take.tune,
+    traceOffset: take.traceOffset,
+    layers: take.layers.map(({ samples, buffer, tuned, ...rest }) => rest),
     keyIdx: state.keyIdx,
     rhythm: state.rhythm,
     palette: state.palette,
@@ -1377,6 +1465,7 @@ document.addEventListener('visibilitychange', () => {
   if (rec) stopRecording();
 });
 
+setAudioSession('playback');
 resetLive();
 drawLive();
 if (location.hash === '#demo') $('#demoBtn').click();

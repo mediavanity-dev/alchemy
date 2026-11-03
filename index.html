@@ -128,7 +128,16 @@
           <div class="section-head"><h2>Progression</h2><span class="hint">Tap a chord to change it</span></div>
           <div class="chords" id="chordList"></div>
 
-          <div class="section-head"><h2>Melody</h2><span class="hint" id="tuningHint"></span></div>
+          <div class="section-head">
+            <h2>Melody</h2>
+            <div class="head-right">
+              <span class="hint" id="tuningHint"></span>
+              <button class="text-btn" id="tuneBtn">
+                <svg viewBox="0 0 24 24"><path d="M3 12h3l2-5 4 10 3-7 2 2h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <span id="tuneLabel">Tune</span>
+              </button>
+            </div>
+          </div>
           <div class="melody" id="melodyLine"></div>
 
           <div class="transport">

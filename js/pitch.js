@@ -7,6 +7,26 @@ const MAX_FREQ = 1100;
 export const freqToMidi = (f) => 69 + 12 * Math.log2(f / 440);
 export const midiToFreq = (m) => 440 * Math.pow(2, (m - 69) / 12);
 
+// Brings a recording to a consistent loudness, judged on the loudest 30% of it
+// (the singing, not the silences), so one stray pop can't keep the whole take
+// quiet. Brief transients that end up above 0.8 are softly rounded off.
+export function normalizeLoudness(x, sr, target = 0.2) {
+  const win = Math.max(1, Math.round(sr * 0.05));
+  const levels = [];
+  for (let i = 0; i + win <= x.length; i += win) levels.push(rmsOf(x.subarray(i, i + win)));
+  if (!levels.length) return x;
+  levels.sort((a, b) => a - b);
+  const loud = levels.slice(Math.floor(levels.length * 0.7));
+  const active = Math.sqrt(loud.reduce((a, v) => a + v * v, 0) / loud.length);
+  if (active < 1e-4) return x;
+  const gain = Math.min(target / active, 30);
+  for (let i = 0; i < x.length; i++) {
+    const v = x[i] * gain, a = Math.abs(v);
+    x[i] = a <= 0.8 ? v : Math.sign(v) * (0.8 + 0.2 * Math.tanh((a - 0.8) / 0.2));
+  }
+  return x;
+}
+
 function rmsOf(x) {
   let s = 0;
   for (let i = 0; i < x.length; i++) s += x[i] * x[i];
