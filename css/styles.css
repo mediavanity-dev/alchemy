@@ -165,16 +165,19 @@ main { flex: 1; position: relative; overflow: hidden; }
 
 /* ---------- capture ---------- */
 .capture {
-  min-height: 100%;
+  /* Fills the screen exactly; the pitch graph takes whatever height is left, so the
+     page never needs scrolling on a phone. */
+  height: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 16px;
-  padding-top: 6px;
+  gap: clamp(6px, 1.8dvh, 16px);
+  padding-top: clamp(0px, 0.8dvh, 6px);
 }
+#view-capture { padding-bottom: clamp(6px, 1.5dvh, 16px); }
 .capture-copy { text-align: center; }
 .prompt { font-family: var(--serif); font-weight: 500; font-size: 26px; line-height: 1.2; }
-.prompt-sub { margin: 6px auto 0; max-width: 32ch; color: var(--muted); font-size: 14px; }
+.prompt-sub { margin: 6px auto 0; max-width: 36ch; color: var(--muted); font-size: 14px; }
 .recording .prompt-sub { visibility: hidden; }
 
 .live { display: flex; flex-direction: column; align-items: center; gap: 6px; }
@@ -209,13 +212,15 @@ main { flex: 1; position: relative; overflow: hidden; }
 
 .live-canvas {
   width: 100%;
-  height: clamp(130px, 26dvh, 240px);
+  flex: 1 1 0;
+  min-height: 64px;
+  max-height: 260px;
   border-radius: var(--radius);
   background: var(--surface);
   border: 1px solid var(--line);
 }
 
-.rec-area { margin-top: auto; display: flex; flex-direction: column; align-items: center; gap: 10px; padding-bottom: 4px; }
+.rec-area { display: flex; flex-direction: column; align-items: center; gap: clamp(4px, 1.2dvh, 10px); }
 .count-pill {
   display: inline-flex;
   align-items: center;
@@ -266,8 +271,23 @@ main { flex: 1; position: relative; overflow: hidden; }
 .recording .rec-icon { width: 26px; height: 26px; border-radius: 6px; }
 .rec-time { color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
 .alt-inputs { display: flex; align-items: center; color: var(--faint); font-size: 13px; }
-.import-link { color: var(--faint); font-size: 13px; text-decoration: underline; text-underline-offset: 3px; padding: 10px; cursor: pointer; }
+.import-link { color: var(--faint); font-size: 13px; text-decoration: underline; text-underline-offset: 3px; padding: 6px 10px; cursor: pointer; }
 .recording .alt-inputs { visibility: hidden; }
+
+/* Shorter phones (and browsers showing their toolbars): everything a size down */
+@media (max-height: 700px) {
+  .prompt { font-size: 22px; }
+  .prompt-sub { font-size: 13px; margin-top: 4px; }
+  .live { gap: 4px; }
+  .live-note { font-size: 44px; height: 46px; }
+  .rec-wrap { width: 96px; height: 96px; }
+  .rec-btn { width: 72px; height: 72px; }
+  .count-pill { min-height: 32px; }
+}
+@media (max-height: 600px) {
+  .prompt-sub { display: none; }
+  .live-note { font-size: 38px; height: 40px; }
+}
 
 /* ---------- harmony ---------- */
 .key-card { padding: 6px 0 2px; }

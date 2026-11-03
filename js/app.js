@@ -345,10 +345,14 @@ function drawLive() {
 
   g.font = '10px ' + token('--font');
   g.textBaseline = 'middle';
+  // Labels thin out when the graph is short, so they never overlap.
+  let lastLabel = Infinity;
   for (let m = Math.ceil(lo); m <= Math.floor(hi); m++) {
     if (![0, 2, 4, 5, 7, 9, 11].includes(pc(m))) continue;
     g.fillStyle = token('--lane');
     g.fillRect(left, y(m) - 0.5, w - left, 1);
+    if (lastLabel - y(m) < 12 || y(m) < 6 || y(m) > h - 6) continue;
+    lastLabel = y(m);
     g.fillStyle = token('--faint');
     g.fillText(noteLabel(m), 8, y(m));
   }
