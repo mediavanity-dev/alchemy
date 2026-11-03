@@ -232,6 +232,11 @@ main { flex: 1; position: relative; overflow: hidden; }
 .count-pill svg { width: 15px; height: 15px; }
 .count-pill[aria-pressed="true"] { color: var(--gold); border-color: var(--gold); }
 .recording .count-pill { visibility: hidden; }
+.beat-dots { display: flex; align-items: center; gap: 12px; height: 14px; }
+.beat-dots i { width: 9px; height: 9px; border-radius: 50%; background: var(--surface-2); transition: background 0.06s, transform 0.06s; }
+.beat-dots i:first-child { width: 12px; height: 12px; }
+.beat-dots i.on { background: var(--gold); transform: scale(1.25); }
+.rec-ring.beat { box-shadow: 0 0 0 5px color-mix(in srgb, var(--gold) 35%, transparent); }
 .live-note.count { color: var(--gold); font-family: var(--serif); font-weight: 500; }
 .rec-wrap { position: relative; width: 116px; height: 116px; display: grid; place-items: center; }
 .rec-ring {

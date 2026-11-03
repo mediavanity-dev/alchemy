@@ -234,6 +234,33 @@ function startCountIn() {
     requestAnimationFrame(step);
   };
   requestAnimationFrame(step);
+  startBeatGuide(r, t0 + outLatency);
+}
+
+// Silent visual pulse in tempo: four dots (beat 1 accented) and a ring flash,
+// timed to when each click reaches the singer's ears. Runs from the count-in
+// through the whole take.
+function startBeatGuide(r, gridT0) {
+  const ctx = synth.ctx;
+  const wrap = $('#beatDots');
+  const dots = [...wrap.children];
+  const ring = $('#recRing');
+  wrap.hidden = false;
+  const frame = () => {
+    if (rec !== r) {
+      wrap.hidden = true;
+      dots.forEach((d) => d.classList.remove('on'));
+      ring.classList.remove('beat');
+      return;
+    }
+    const pos = (ctx.currentTime - gridT0) / r.beat;
+    const k = Math.floor(pos), frac = pos - k;
+    const idx = pos < 0 ? -1 : k % 4;
+    dots.forEach((d, i) => d.classList.toggle('on', i === idx && frac < 0.55));
+    ring.classList.toggle('beat', pos >= 0 && frac < 0.18);
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
 }
 
 function onChunk(chunk, time) {
@@ -350,7 +377,7 @@ async function stopRecording() {
     return;
   }
   // With a count-in, the beat grid is known exactly: the take starts on a downbeat.
-  const tempo = r.bpm ? { bpm: r.bpm, beat: 60 / r.bpm, downbeat: 0, steady: true, manual: true } : null;
+  const tempo = r.bpm ? { bpm: r.bpm, beat: 60 / r.bpm, downbeat: 0, steady: true, manual: true, source: 'countin' } : null;
   await processAudio(concat(r.chunks, r.length), r.sr, defaultName(), tempo);
 }
 
@@ -588,6 +615,8 @@ function reanalyze() {
 // Re-fit the beat grid to the current notes, keeping a tempo the user set by hand.
 function retempo() {
   const take = state.take;
+  // A count-in tempo is ground truth for the take; never re-detect it.
+  if (take.tempo?.source === 'countin') return;
   const manual = take.tempo?.manual ? take.tempo.bpm : null;
   take.tempo = detectTempo(take.notes, manual);
   if (take.tempo && manual) take.tempo.manual = true;
@@ -649,7 +678,9 @@ function renderHarmony() {
     const bpm = Math.round(take.tempo.bpm);
     $('#tempoText').textContent = bpm;
     tempoBtn.setAttribute('aria-pressed', String(state.metronome));
-    tempoBtn.setAttribute('aria-label', `Metronome ${state.metronome ? 'on' : 'off'}, ${bpm} beats per minute. Press and hold to adjust.`);
+    tempoBtn.setAttribute('aria-label', take.tempo.source === 'countin'
+      ? `Metronome ${state.metronome ? 'on' : 'off'}, ${bpm} beats per minute from your count-in.`
+      : `Metronome ${state.metronome ? 'on' : 'off'}, ${bpm} beats per minute. Press and hold to adjust.`);
   }
   $('#layerCount').textContent = take.layers.length || '';
 
@@ -1498,7 +1529,9 @@ function openTuneSheet() {
   btn.addEventListener('click', () => {
     if (held) { held = false; return; }
     setMetronome(!state.metronome);
-    if (state.metronome && !setMetronome.hinted) {
+    if (state.take?.tempo?.source === 'countin') {
+      if (state.metronome) toast(`Metronome on at your count-in tempo, ${Math.round(state.take.tempo.bpm)} bpm.`);
+    } else if (state.metronome && !setMetronome.hinted) {
       setMetronome.hinted = true;
       toast('Metronome on. Press and hold the tempo to adjust it.');
     }
@@ -1527,6 +1560,25 @@ function openTempoSheet() {
   const take = state.take;
   if (!take?.tempo) return;
   const t = take.tempo;
+  if (t.source === 'countin') {
+    // The tempo you recorded to is fixed; only the click can be switched.
+    openSheet(`<div class="tempo-sheet">
+      <h3>Metronome</h3>
+      <p class="sub">Set by your count-in when you recorded, so it's locked to your take's timing. It clicks only during playback and layer recording.</p>
+      <div class="tempo-row"><div class="tempo-value">${Math.round(t.bpm)}<small>BPM</small></div></div>
+      <div class="seg" role="group" aria-label="Click">
+        <button data-click="off" class="${state.metronome ? '' : 'active'}">Click off</button>
+        <button data-click="on" class="${state.metronome ? 'active' : ''}">Click on</button>
+      </div>
+    </div>`);
+    $('#sheetBody .tempo-sheet').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-click]');
+      if (!b) return;
+      setMetronome(b.dataset.click === 'on');
+      openTempoSheet();
+    });
+    return;
+  }
   openSheet(`<div class="tempo-sheet">
     <h3>Metronome</h3>
     <p class="sub">${t.manual ? 'Tempo set by you.' : `Estimated from your take${t.steady ? '' : ', which drifts a little, so it may need a nudge'}.`} It clicks only during playback and layer recording.</p>
