@@ -1,4 +1,4 @@
-import { extractTrack, segmentNotes, livePitch, normalizeLoudness } from './pitch.js';
+import { extractTrack, segmentNotes, livePitch, normalizeLoudness, acRms } from './pitch.js';
 import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing, detectTempo, beatsBetween, rankChords, METERS, barBeats, rateOf } from './theory.js';
 import { Synth } from './synth.js';
 import { tuneClip, targetFn } from './tune.js';
@@ -287,8 +287,21 @@ function startBeatGuide(r, gridT0) {
   requestAnimationFrame(frame);
 }
 
+// The room's background level, followed while the mic is open (the count-in too):
+// it drops quickly to anything quieter and creeps up 1 dB a second, so it settles
+// on the quiet between notes. The live note readout and the record ring
+// are judged against it rather than a fixed level, so soft singing still shows.
+function trackFloor(chunk) {
+  const lvl = Math.max(1e-6, acRms(chunk));
+  rec.floor = rec.floor == null ? lvl : lvl < rec.floor ? rec.floor + (lvl - rec.floor) * 0.5 : rec.floor * 10 ** ((1 / 20) * (chunk.length / rec.sr));
+}
+
+// Never stricter than the old fixed gate, so sustained singing can't gate itself out.
+const liveGate = () => Math.max(2e-5, Math.min(0.003, rec.floor * 2.5));
+
 function onChunk(chunk, time) {
   if (!rec) return;
+  trackFloor(chunk);
   // Drop audio from before the take starts (the count-in).
   if (time != null && time < rec.startAt) {
     const skip = Math.round((rec.startAt - time) * rec.sr);
@@ -300,13 +313,14 @@ function onChunk(chunk, time) {
   const r = rec.recent;
   r.copyWithin(0, chunk.length);
   r.set(chunk, r.length - chunk.length);
-  const p = livePitch(r, rec.sr);
+  const p = livePitch(r, rec.sr, liveGate());
   rec.trace.push({ t: rec.length / rec.sr, midi: p.midi });
-  updateLive(p);
+  updateLive(p, liveGate() / 2.5);
 }
 
-function updateLive(p) {
-  const level = Math.min(1, p.rms * 10);
+function updateLive(p, floor = 1e-4) {
+  // In decibels above the room, so a quiet voice moves the ring as visibly as a loud one.
+  const level = Math.max(0, Math.min(1, (20 * Math.log10(Math.max(p.rms, 1e-7) / floor) - 6) / 34));
   $('#recRing').style.setProperty('--lvl', (0.86 + level * 0.3).toFixed(3));
   const noteEl = $('#liveNote'), needle = $('#centsNeedle');
   if (p.midi != null) {
@@ -582,7 +596,7 @@ async function processAudio(samples, sampleRate, name, tempo = null) {
   const { kind, features } = classify(raw, sampleRate, track);
   // Plucked and struck instruments are levelled by their peaks, so their attacks
   // aren't rounded off the way loudness levelling (made for singing) would.
-  if (kind === 'melody' && features.decay < 0.6) samples = normalizePeak(raw);
+  if (kind === 'melody' && features.decay < 0.6) samples = normalizePeak(raw, sampleRate);
   setProcessing(true, 1);
   await new Promise((r) => setTimeout(r, 250));
   setProcessing(false);
@@ -1662,7 +1676,7 @@ async function analyzeRecording(raw, sr, offset, onProgress) {
   return {
     // Singing is levelled by loudness; struck and strummed sounds by their peaks,
     // so their attacks stay intact.
-    samples: sound.kind === 'melody' ? forPitch : normalizePeak(raw),
+    samples: sound.kind === 'melody' ? forPitch : normalizePeak(raw, sr),
     duration: raw.length / sr,
     offset,
     notes: seg.notes.map((n) => ({ ...n, start: n.start + offset, end: n.end + offset })),

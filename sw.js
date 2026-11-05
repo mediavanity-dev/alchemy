@@ -1,5 +1,5 @@
 // Network-first service worker: always fresh when online, still opens offline.
-const CACHE = 'alchemy-v19';
+const CACHE = 'alchemy-v20';
 const SHELL = [
   './',
   'index.html',

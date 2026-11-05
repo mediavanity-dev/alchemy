@@ -9,8 +9,11 @@ export const midiToFreq = (m) => 440 * Math.pow(2, (m - 69) / 12);
 
 // Brings a recording to a consistent loudness, judged on the loudest 30% of it
 // (the singing, not the silences), so one stray pop can't keep the whole take
-// quiet. Brief transients that end up above 0.8 are softly rounded off.
+// quiet. Very quiet takes are lifted a long way (the mic runs without the phone's
+// voice processing, so its raw level is low), but never so far that the room's
+// background hiss becomes loud. Brief transients above 0.8 are softly rounded off.
 export function normalizeLoudness(x, sr, target = 0.2) {
+  highpass(x, sr);
   const win = Math.max(1, Math.round(sr * 0.05));
   const levels = [];
   for (let i = 0; i + win <= x.length; i += win) levels.push(rmsOf(x.subarray(i, i + win)));
@@ -18,13 +21,48 @@ export function normalizeLoudness(x, sr, target = 0.2) {
   levels.sort((a, b) => a - b);
   const loud = levels.slice(Math.floor(levels.length * 0.7));
   const active = Math.sqrt(loud.reduce((a, v) => a + v * v, 0) / loud.length);
-  if (active < 1e-4) return x;
-  const gain = Math.min(target / active, 30);
+  if (active < 1e-5) return x;
+  const gain = Math.min(target / active, MAX_GAIN, Math.max(1, 0.01 / noiseFloor(levels)));
   for (let i = 0; i < x.length; i++) {
     const v = x[i] * gain, a = Math.abs(v);
     x[i] = a <= 0.8 ? v : Math.sign(v) * (0.8 + 0.2 * Math.tanh((a - 0.8) / 0.2));
   }
   return x;
+}
+
+const MAX_GAIN = 1000; // 60 dB
+
+// The room's background level: the quiet end of a take's short-window loudness
+// (sorted ascending). Frames of pure digital silence don't count.
+export function noiseFloor(sortedLevels) {
+  const live = sortedLevels.filter((v) => v > 1e-7);
+  return live.length ? live[Math.floor(live.length * 0.1)] : 1e-7;
+}
+
+// Removes DC offset and sub-audio rumble (handling noise, wind, desk thumps) below
+// about 25 Hz, which would otherwise swamp the level of a quiet take. In place.
+export function highpass(x, sr, cutoff = 25) {
+  const w0 = (2 * Math.PI * cutoff) / sr;
+  const cos = Math.cos(w0), alpha = Math.sin(w0) / (2 * Math.SQRT1_2), a0 = 1 + alpha;
+  const b0 = (1 + cos) / 2 / a0, b1 = -(1 + cos) / a0, b2 = b0, a1 = (-2 * cos) / a0, a2 = (1 - alpha) / a0;
+  let x1 = x[0] || 0, x2 = x1, y1 = 0, y2 = 0;
+  for (let i = 0; i < x.length; i++) {
+    const v = x[i];
+    const y = b0 * v + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+    x2 = x1; x1 = v; y2 = y1; y1 = y;
+    x[i] = y;
+  }
+  return x;
+}
+
+// Level with any DC offset taken out (some phone mics sit off centre).
+export function acRms(x) {
+  let m = 0;
+  for (let i = 0; i < x.length; i++) m += x[i];
+  m /= x.length || 1;
+  let s = 0;
+  for (let i = 0; i < x.length; i++) s += (x[i] - m) ** 2;
+  return Math.sqrt(s / (x.length || 1));
 }
 
 function rmsOf(x) {
@@ -118,9 +156,10 @@ export function mpm(frame, rate) {
 }
 
 // Quick estimate for the live meter while recording.
-export function livePitch(frame, sr) {
-  const rms = rmsOf(frame);
-  if (rms < 0.003) return { rms, midi: null };
+// gate: the level below which it's taken as background, judged from the room's noise.
+export function livePitch(frame, sr, gate = 0.003) {
+  const rms = acRms(frame);
+  if (rms < gate) return { rms, midi: null };
   const { data, rate } = decimate(frame, sr);
   const p = mpm(data, rate);
   return { rms, midi: p && p.clarity > 0.85 ? freqToMidi(p.freq) : null };
@@ -161,7 +200,10 @@ export function segmentNotes({ frames, hop }) {
 
   const sortedRms = frames.map((f) => f.rms).sort((a, b) => a - b);
   const p95 = sortedRms[Math.floor(sortedRms.length * 0.95)] || 0;
-  const gate = Math.max(0.003, p95 * 0.12);
+  // A note counts if it stands clear of the room's background, however much softer
+  // it is than the loudest part of the take (down to 34 dB below it). With no
+  // silence to measure the room by, the floor falls back to 18 dB below the peak.
+  const gate = Math.max(1e-4, p95 * 0.02, Math.min(p95 * 0.12, noiseFloor(sortedRms) * 2));
 
   const raw = frames.map((f) =>
     f.midi != null && f.rms >= gate && f.clarity >= 0.78 && f.midi > 26 && f.midi < 100 ? f.midi : null

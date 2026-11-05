@@ -1,4 +1,4 @@
-import { decimate } from './pitch.js';
+import { decimate, highpass, noiseFloor } from './pitch.js';
 
 // What kind of sound a layer is (a melody line, chords, or rhythm), plus the
 // analysis each kind needs: a chroma profile for chords and hit times for rhythm.
@@ -279,12 +279,21 @@ export function analyze(x, sr, track) {
 }
 
 // Peak normalisation for struck and strummed sounds: unlike the loudness levelling
-// used for singing, it never rounds off the attacks.
-export function normalizePeak(x, target = 0.9) {
+// used for singing, it never rounds off the attacks. Like that levelling, it lifts
+// quiet recordings a long way but stops before the room's hiss gets loud.
+export function normalizePeak(x, sr = 48000, target = 0.9) {
+  highpass(x, sr);
   let peak = 0;
   for (let i = 0; i < x.length; i++) peak = Math.max(peak, Math.abs(x[i]));
-  if (peak < 1e-4) return x;
-  const g = Math.min(target / peak, 30);
+  if (peak < 1e-5) return x;
+  const win = Math.max(1, Math.round(sr * 0.05)), levels = [];
+  for (let i = 0; i + win <= x.length; i += win) {
+    let e = 0;
+    for (let j = i; j < i + win; j++) e += x[j] * x[j];
+    levels.push(Math.sqrt(e / win));
+  }
+  levels.sort((a, b) => a - b);
+  const g = Math.min(target / peak, 1000, Math.max(1, 0.01 / noiseFloor(levels)));
   for (let i = 0; i < x.length; i++) x[i] *= g;
   return x;
 }
