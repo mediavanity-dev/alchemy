@@ -1,6 +1,7 @@
-import { extractTrack, segmentNotes, livePitch, normalizeLoudness, acRms } from './pitch.js';
+import { extractTrack, segmentNotes, livePitch, normalizeLoudness, acRms, highpass } from './pitch.js';
 import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing, voiceLead, bassLine, detectTempo, beatsBetween, rankChords, METERS, barBeats, rateOf } from './theory.js';
 import { midiFile } from './midi.js';
+import { findOnsets, chooseGrid, anchorsFor, timeMap, warp, warpTrace } from './timing.js';
 import { Synth } from './synth.js';
 import { tuneClip, targetFn } from './tune.js';
 import { analyze, classify, chromaOf, hitsOf, normalizePeak } from './sound.js';
@@ -186,6 +187,9 @@ document.querySelectorAll('[data-goto]').forEach((b) => b.addEventListener('clic
 
 let rec = null;
 let starting = false;
+// Delay this device adds beyond what the browser reports (seconds), measured from
+// the last count-in the mic heard. Used for the next count-in and for layers.
+let latencyFix = 0;
 let lastTrace = [];
 let liveCenter = 57;
 let liveRaf = 0;
@@ -232,9 +236,13 @@ function startCountIn() {
   const n = barBeats(meter);
   const t0 = ctx.currentTime + 0.3;
   synth.countIn(t0, beat, n);
-  // Align the take with when the singer actually hears the beat, plus the mic's own delay.
+  // Align the take with when the singer actually hears the beat, plus the mic's own
+  // delay: as reported, plus what the last count-in showed the report misses. The
+  // count-in itself is measured when the take stops (see measureRoundTrip).
   const outLatency = ctx.outputLatency || ctx.baseLatency || 0;
-  Object.assign(rec, { counting: true, countT0: t0, beat, bpm, meter, bar: n, startAt: t0 + n * beat + outLatency + rec.mic.latency });
+  const assumed = outLatency + rec.mic.latency;
+  const used = Math.max(0, assumed + latencyFix);
+  Object.assign(rec, { counting: true, countT0: t0, beat, bpm, meter, bar: n, assumed, used, pre: [], startAt: t0 + n * beat + used });
   $('#capturePrompt').textContent = 'Get ready…';
   const noteEl = $('#liveNote');
   noteEl.classList.add('count');
@@ -304,9 +312,11 @@ const liveGate = () => Math.max(2e-5, Math.min(0.003, rec.floor * 2.5));
 function onChunk(chunk, time) {
   if (!rec) return;
   trackFloor(chunk);
-  // Drop audio from before the take starts (the count-in).
+  // Audio from before the take starts (the count-in) is set aside: it's used to
+  // measure the device's delay, and never becomes part of the take.
   if (time != null && time < rec.startAt) {
     const skip = Math.round((rec.startAt - time) * rec.sr);
+    if (rec.pre && time >= rec.countT0 - 0.25) rec.pre.push({ time, data: chunk.subarray(0, Math.min(skip, chunk.length)) });
     if (skip >= chunk.length) return;
     chunk = chunk.subarray(skip);
   }
@@ -436,7 +446,69 @@ async function stopRecording() {
   }
   // With a count-in, the beat grid is known exactly: the take starts on a downbeat.
   const tempo = r.bpm ? { bpm: r.bpm, beat: 60 / r.bpm, downbeat: 0, steady: true, manual: true, source: 'countin', meter: r.meter } : null;
-  await processAudio(concat(r.chunks, r.length), r.sr, defaultName(), tempo);
+  await processAudio(r.bpm ? alignToCountIn(r) : concat(r.chunks, r.length), r.sr, defaultName(), tempo);
+}
+
+// The take, starting exactly where the singer heard the first beat after the
+// count-in. When the mic heard the count-in clicks, the delay is measured and the
+// start corrected: trimmed if the take began early, or the missing moment taken
+// back from the count-in audio if it began late.
+function alignToCountIn(r) {
+  let samples = concat(r.chunks, r.length);
+  const measured = measureRoundTrip(r);
+  if (measured == null) return samples;
+  latencyFix = measured - r.assumed;
+  const shift = Math.round((measured - r.used) * r.sr);
+  if (shift > 0) return samples.slice(Math.min(shift, samples.length - 1));
+  if (shift < 0) {
+    const preLen = r.pre.reduce((a, p) => a + p.data.length, 0);
+    const pre = concat(r.pre.map((p) => p.data), preLen);
+    const take = Math.min(-shift, pre.length);
+    const out = new Float32Array(take + samples.length);
+    out.set(pre.subarray(pre.length - take));
+    out.set(samples, take);
+    samples = out;
+  }
+  return samples;
+}
+
+// The count-in clicks come back through the mic when they play from the speaker
+// (or leak from headphones), and where they land shows the real delay from
+// scheduling a sound to recording it: output and input together, which browsers
+// often under-report (Bluetooth especially). Clicks are found above 1 kHz, where
+// they are strong and voices are weak; at least three must agree to within 15 ms.
+// Returns null when they can't be heard clearly, and the reported delay stands.
+function measureRoundTrip(r) {
+  if (!r.pre?.length) return null;
+  const sr = r.sr, t0 = r.pre[0].time;
+  const x = concat(r.pre.map((p) => p.data), r.pre.reduce((a, p) => a + p.data.length, 0));
+  highpass(x, sr, 1000);
+  const blk = Math.max(1, Math.round(sr * 0.001)), nb = Math.floor(x.length / blk);
+  if (nb < 50) return null;
+  const e = new Float32Array(nb);
+  for (let b = 0; b < nb; b++) {
+    let s = 0;
+    for (let i = b * blk; i < (b + 1) * blk; i++) s += x[i] * x[i];
+    e[b] = Math.sqrt(s / blk);
+  }
+  const floor = Float32Array.from(e).sort()[Math.floor(nb * 0.2)] || 1e-9;
+  const found = [];
+  for (let k = 0; k < r.bar; k++) {
+    const s = r.countT0 + k * r.beat;
+    const a = Math.round((s - t0) / 0.001), b = Math.min(nb, a + Math.round(Math.min(0.4, r.beat - 0.03) / 0.001));
+    if (a < 0 || b <= a) continue;
+    let peak = 0;
+    for (let i = a; i < b; i++) peak = Math.max(peak, e[i]);
+    if (peak < floor * 10) continue;
+    let i = a;
+    while (i < b && e[i] < peak * 0.3) i++;
+    found.push(t0 + i * 0.001 - s);
+  }
+  if (found.length < Math.min(3, r.bar)) return null;
+  found.sort((a, b) => a - b);
+  if (found[found.length - 1] - found[0] > 0.015) return null;
+  const median = found[found.length >> 1];
+  return median > 0.002 && median < 0.5 ? median : null;
 }
 
 /* ---------- count-in ---------- */
@@ -908,6 +980,9 @@ function renderHarmony() {
   const tuneLevel = TUNE_LEVELS.find((l) => l.amount === take.tune.amount);
   $('#tuneLabel').textContent = take.tune.amount ? `Tuned · ${tuneLevel?.label ?? ''}` : 'Tune';
   $('#tuneBtn').classList.toggle('strong', !!take.tune.amount);
+  const locked = take.timing?.applied;
+  $('#timingLabel').textContent = locked ? `Locked · ${locked === 'auto' ? 'auto' : gridName(locked, take.tempo?.meter)}` : 'Timing';
+  $('#timingBtn').classList.toggle('strong', !!locked);
 
   updateTransportStatus();
   $('#saveBtn').classList.toggle('saved', !!take.id && !take.dirty);
@@ -1688,7 +1763,7 @@ async function stopLayer() {
   const sr = r.mic.sr;
   // The round trip from speaker to ear to mic: what was sung at a given moment was
   // heard this much earlier.
-  const lat = outLatency + r.mic.latency;
+  const lat = Math.max(0, outLatency + r.mic.latency + latencyFix);
   // Where the first recorded sample sits on the take's timeline
   const offset = r.play.start + (r.firstTime - r.play.t0) - lat;
 
@@ -2097,6 +2172,167 @@ function openTuneSheet() {
   });
 }
 
+/* ---------- timing: lock to the beat ---------- */
+
+// The grid in note values, for the take's time signature (the tempo counts
+// quarters, or eighths in x/8).
+function gridName(div, meter = '4/4') {
+  if (div === 3) return 'triplets';
+  const base = (+meter.split('/')[1] || 4) === 8 ? 8 : 4;
+  return `1/${base * div}`;
+}
+
+const TIMING_FIELDS = ['samples', 'duration', 'notes', 'trace', 'hits', 'trim'];
+
+// Where a clip's audio and analysis live: the take, a layer, or a layer's chosen pass.
+const timingHome = (l) => (l.passes ? l.passes[l.pass ?? 0] : l);
+
+// After the timing changed: keys and chords from the moved notes, on the same beat
+// grid (the audio was just fitted to it), keeping the key the user had chosen.
+function refitAfterTiming() {
+  const was = state.keys[state.keyIdx];
+  state.keys = detectKeys(analysisNotes(), playedSources());
+  const i = state.keys.findIndex((k) => k.tonic === was.tonic && k.mode === was.mode);
+  state.keyIdx = Math.max(0, i);
+  reharmonize();
+  renderHarmony();
+}
+
+// Puts the original timing back (every clip that was locked).
+function restoreTiming() {
+  const take = state.take;
+  const put = (obj, orig) => { for (const f of TIMING_FIELDS) if (f in orig) obj[f] = orig[f]; };
+  if (take.timingOriginal) {
+    put(take, take.timingOriginal);
+    take.timingOriginal = null;
+    take.track = null;
+    take.buffer = take.bufferCtx = take.tuned = null;
+  }
+  for (const l of take.layers) {
+    const home = timingHome(l);
+    if (!home.timingOriginal) continue;
+    put(home, home.timingOriginal);
+    home.timingOriginal = null;
+    home.chroma = home.blocks = null;
+    if (l.passes) usePass(l, l.pass ?? 0);
+    else { l.chroma = l.blocks = l.buffer = l.bufferCtx = l.tuned = null; prepareLayer(l); }
+  }
+  take.timing = { ...take.timing, applied: null };
+}
+
+// Moves every note and hit start in the take (and, if asked, its layers) onto the
+// beat grid, by `amount` (1 = exactly), always starting from the original timing.
+// Returns how many starts moved and the grid used for the take.
+async function applyTiming({ grid, amount, layers }) {
+  const take = state.take, tempo = take.tempo;
+  restoreTiming();
+  // The audio now follows this grid, so it stays put from here on.
+  if (tempo.source !== 'countin') tempo.manual = true;
+  const clips = [{ obj: take, offset: 0, notes: take.notes, kind: 'melody' }];
+  if (layers) {
+    for (const l of take.layers) {
+      clips.push({ obj: l, offset: l.offset, kind: kindOf(l), notes: l.notes.map((n) => ({ ...n, start: n.start - l.offset, end: n.end - l.offset })) });
+    }
+  }
+  let moved = 0, used = null;
+  for (const [k, c] of clips.entries()) {
+    setProcessing(true, 0.05 + (0.9 * k) / clips.length);
+    await nextFrame();
+    const o = c.obj, sr = o.sampleRate, duration = o.samples.length / sr;
+    const onsets = findOnsets(o.samples, sr, c.kind === 'rhythm' ? [] : c.notes, o.hits ? o.hits : undefined);
+    if (!onsets.length) continue;
+    const div = grid === 'auto' ? chooseGrid(onsets.map((t) => t + c.offset), tempo) : grid;
+    const { anchors, moved: n } = anchorsFor(onsets, tempo, div, amount, c.offset, duration);
+    if (!n) continue;
+    if (o === take) used = div;
+    moved += n;
+    const map = timeMap(anchors, duration);
+    const home = o === take ? take : timingHome(o);
+    const orig = {};
+    for (const f of TIMING_FIELDS) if (home[f] !== undefined) orig[f] = home[f];
+    const next = {
+      samples: warp(o.samples, sr, map),
+      duration: map.length,
+      notes: o.notes.map((nt) => ({ ...nt, start: map.toDst(nt.start - c.offset) + c.offset, end: map.toDst(nt.end - c.offset) + c.offset })),
+    };
+    if (o.trace) next.trace = warpTrace(o.trace, o.traceT0, o.hop, map);
+    if (o.hits) next.hits = o.hits.map((h) => ({ ...h, t: +map.toDst(h.t).toFixed(4) }));
+    if (o === take) {
+      next.trim = { start: map.toDst(take.trim.start), end: take.trim.end >= duration - 0.05 ? map.length : map.toDst(take.trim.end) };
+      Object.assign(take, next, { timingOriginal: orig, track: null, buffer: null, bufferCtx: null, tuned: null });
+    } else {
+      Object.assign(home, next, { timingOriginal: orig, chroma: null, blocks: null });
+      if (o.passes) usePass(o, o.pass ?? 0);
+      else { Object.assign(o, { chroma: null, blocks: null, buffer: null, bufferCtx: null, tuned: null }); prepareLayer(o); }
+    }
+  }
+  take.timing = { grid, amount, layers, applied: used ?? (moved ? grid : null) };
+  setProcessing(false);
+  return { moved, used };
+}
+
+$('#timingBtn').addEventListener('click', () => openTimingSheet());
+
+function openTimingSheet(draft = null) {
+  const take = state.take, tempo = take.tempo;
+  const cur = take.timing ?? {};
+  const d = draft ?? { grid: cur.grid ?? 'auto', amount: cur.amount ?? 1, layers: cur.layers ?? true };
+  const meter = tempo?.meter ?? '4/4';
+  const grids = ['auto', 1, 2, 4, 3];
+  const detected = tempo && tempo.source !== 'countin' && !tempo.manual;
+  openSheet(`<div class="tune-sheet">
+    <h3>Lock to the beat</h3>
+    <p class="sub">Finds where each note and hit starts and moves it onto the beat grid, stretching the sound in between so the pitch doesn't change. Your original timing is kept, so you can put it back any time.</p>
+    ${!tempo ? '<p class="sub"><b>This needs a beat grid.</b> Record with a count-in, or set a tempo with the metronome button.</p>' : `
+    ${detected ? `<p class="sub">The beat grid (${Math.round(tempo.bpm)} bpm) was worked out from your singing. Check it with the metronome first, or record with a count-in, for the tightest result.</p>` : ''}
+    <span class="label">Grid</span>
+    <div class="seg" role="group" aria-label="Grid">
+      ${grids.map((g) => `<button data-grid="${g}" class="${String(g) === String(d.grid) ? 'active' : ''}">${g === 'auto' ? 'Auto' : g === 3 ? 'Triplets' : gridName(g, meter)}</button>`).join('')}
+    </div>
+    <span class="label">Strength</span>
+    <div class="seg" role="group" aria-label="Strength">
+      <button data-amount="0.5" class="${d.amount === 0.5 ? 'active' : ''}">Tighten</button>
+      <button data-amount="1" class="${d.amount === 1 ? 'active' : ''}">Lock</button>
+    </div>
+    ${take.layers.length ? `<span class="label">Apply to</span>
+    <div class="seg" role="group" aria-label="Apply to">
+      <button data-layers="0" class="${d.layers ? '' : 'active'}">Take only</button>
+      <button data-layers="1" class="${d.layers ? 'active' : ''}">Take and layers</button>
+    </div>` : ''}
+    <button class="btn primary block tune-listen" id="timingApply">${cur.applied ? 'Lock again and listen' : 'Lock and listen'}</button>
+    ${cur.applied ? '<button class="btn block" id="timingUndo" style="margin-top:8px">Put back my original timing</button>' : ''}`}
+    </div>`);
+  const sheet = $('#sheetBody .tune-sheet');
+  sheet.addEventListener('click', async (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.grid) return openTimingSheet({ ...d, grid: b.dataset.grid === 'auto' ? 'auto' : +b.dataset.grid });
+    if (b.dataset.amount) return openTimingSheet({ ...d, amount: +b.dataset.amount });
+    if (b.dataset.layers) return openTimingSheet({ ...d, layers: b.dataset.layers === '1' });
+    if (b.id === 'timingUndo') {
+      closeSheet();
+      stopPlayback();
+      restoreTiming();
+      markDirty();
+      refitAfterTiming();
+      toast('Original timing restored');
+      return;
+    }
+    if (b.id === 'timingApply') {
+      closeSheet();
+      stopPlayback();
+      const { moved, used } = await applyTiming(d);
+      markDirty();
+      refitAfterTiming();
+      if (!moved) { toast("Couldn't find any note starts to move."); return; }
+      toast(`Moved ${moved} start${moved === 1 ? '' : 's'} onto ${used ? gridName(used, tempo.meter) : 'the'} grid${d.amount < 1 ? ', halfway' : ''}.`, 3200);
+      if (!track('take').on) setTrack('take', { on: true });
+      startPlayback();
+      haptic();
+    }
+  });
+}
+
 /* ---------- metronome ---------- */
 
 // Tap toggles the click; press and hold opens tempo adjustments.
@@ -2353,6 +2589,8 @@ $('#saveBtn').addEventListener('click', () => {
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
 });
 
+const withoutSamples = (o) => (o ? (({ samples, ...rest }) => rest)(o) : undefined);
+
 async function saveTake(name) {
   const take = state.take;
   take.name = name || take.name;
@@ -2373,11 +2611,14 @@ async function saveTake(name) {
     trim: take.trim,
     tempo: take.tempo,
     tune: take.tune,
+    timing: take.timing,
+    timingOriginal: withoutSamples(take.timingOriginal),
     traceOffset: take.traceOffset,
     // Chroma and drawing caches are rebuilt from the audio when the take is opened.
-    layers: take.layers.map(({ samples, buffer, bufferCtx, tuned, chroma, blocks, passes, ...rest }) => ({
+    layers: take.layers.map(({ samples, buffer, bufferCtx, tuned, chroma, blocks, passes, timingOriginal, ...rest }) => ({
       ...rest,
-      passes: passes?.map(({ samples: _, chroma: __, ...pass }) => pass),
+      timingOriginal: withoutSamples(timingOriginal),
+      passes: passes?.map(({ samples: _, chroma: __, timingOriginal: to, ...pass }) => ({ ...pass, timingOriginal: withoutSamples(to) })),
     })),
     mix: take.mix,
     keyIdx: state.keyIdx,
@@ -2397,6 +2638,12 @@ async function saveTake(name) {
     base: take.samples,
     layers: Object.fromEntries(take.layers.filter((l) => !l.passes).map((l) => [l.id, l.samples])),
     passes: Object.fromEntries(take.layers.filter((l) => l.passes).map((l) => [l.id, l.passes.map((x) => x.samples)])),
+    // Original timing, kept while a take is locked to the beat
+    originals: {
+      base: take.timingOriginal?.samples,
+      layers: Object.fromEntries(take.layers.filter((l) => !l.passes && l.timingOriginal).map((l) => [l.id, l.timingOriginal.samples])),
+      passes: Object.fromEntries(take.layers.filter((l) => l.passes).map((l) => [l.id, l.passes.map((x) => x.timingOriginal?.samples ?? null)])),
+    },
   };
   try {
     await store.save(meta, audio);
@@ -2528,15 +2775,20 @@ $('#libList').addEventListener('click', async (e) => {
     const { meta, samples: raw } = await store.load(open.dataset.id);
     // Early saves stored the take's samples directly; newer ones store base + layers.
     const audio = raw instanceof Float32Array ? { base: raw, layers: {} } : raw;
+    const orig = audio.originals ?? {};
+    // A locked clip's original timing comes back only with its original audio.
+    const withOriginal = (to, samples) => (to && samples ? { ...to, samples } : null);
     const layers = (meta.layers ?? [])
       .map((l) => {
         const clips = audio.passes?.[l.id];
-        if (!l.passes || !clips) return { ...l, passes: undefined, samples: audio.layers?.[l.id] };
-        const passes = l.passes.map((x, k) => ({ ...x, samples: clips[k] }));
+        if (!l.passes || !clips) {
+          return { ...l, passes: undefined, samples: audio.layers?.[l.id], timingOriginal: withOriginal(l.timingOriginal, orig.layers?.[l.id]) };
+        }
+        const passes = l.passes.map((x, k) => ({ ...x, samples: clips[k], timingOriginal: withOriginal(x.timingOriginal, orig.passes?.[l.id]?.[k]) }));
         return { ...l, passes, samples: passes[l.pass ?? 0]?.samples };
       })
       .filter((l) => l.samples);
-    loadTake({ ...meta, samples: audio.base, layers }, meta);
+    loadTake({ ...meta, samples: audio.base, layers, timingOriginal: withOriginal(meta.timingOriginal, orig.base) }, meta);
     showView('harmony');
   } catch {
     toast("Couldn't open that take.");

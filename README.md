@@ -29,6 +29,7 @@ Append `#demo` to the URL to load a built-in demo melody without a microphone.
 | `js/sound.js` | Classifies a recording as melody, chords or rhythm; tuning-corrected chroma (pitch-class energy) for chord layers; hit detection with kick/snare/hi-hat labels for rhythm layers. |
 | `js/track-worker.js` | Runs pitch tracking in a Web Worker so the page stays smooth. |
 | `js/midi.js` | Writes the melody, chords and bass as a standard MIDI file. |
+| `js/timing.js` | Lock to the beat: finds note and hit starts, picks the subdivision that best explains them, moves each onto the grid and time-stretches the audio between (WSOLA, pitch unchanged, attacks untouched). |
 | `js/tune.js` | Optional pitch correction (TD-PSOLA) toward the nearest note or the key. |
 | `js/synth.js` | Web Audio pad, lead, clicks, drum kit and recorded-audio playback, mixed per track, with a small reverb. |
 | `js/db.js` | IndexedDB library (metadata and audio in separate stores). |
