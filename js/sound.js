@@ -73,9 +73,9 @@ export function chromaOf(samples, sampleRate) {
   const loud = percentile(frames.map((f) => f.rms), 0.95);
   const binHz = sr / size;
   const lo = Math.ceil(70 / binHz), hi = Math.floor(2100 / binHz);
-  const out = frames.map((f) => {
-    const c = new Float32Array(12);
-    if (f.rms < loud * 0.12) return c;
+  // First the spectral peaks of every loud frame...
+  const framePeaks = frames.map((f) => {
+    if (f.rms < loud * 0.12) return null;
     const m = f.mag;
     let peak = 0;
     for (let k = lo; k <= hi; k++) peak = Math.max(peak, m[k]);
@@ -85,8 +85,21 @@ export function chromaOf(samples, sampleRate) {
       // Parabolic interpolation for the true peak frequency
       const a = Math.log(m[k - 1] + 1e-9), b = Math.log(m[k] + 1e-9), g = Math.log(m[k + 1] + 1e-9);
       const d = 0.5 * (a - g) / (a - 2 * b + g || 1e-9);
-      peaks.push({ f: (k + d) * binHz, m: m[k] });
+      peaks.push({ f: (k + d) * binHz, m: m[k], midi: 69 + 12 * Math.log2(((k + d) * binHz) / 440) });
     }
+    return peaks;
+  });
+  // ...then how far the instrument sits from A440 (a guitar tuned to itself, an old
+  // piano), so every note lands in its own pitch class rather than straddling two.
+  let sx = 0, sy = 0;
+  for (const peaks of framePeaks) for (const p of peaks ?? []) {
+    const a = 2 * Math.PI * (p.midi - Math.round(p.midi)), w = Math.sqrt(p.m);
+    sx += w * Math.cos(a); sy += w * Math.sin(a);
+  }
+  const tuning = sx || sy ? Math.atan2(sy, sx) / (2 * Math.PI) : 0;
+  const out = framePeaks.map((peaks) => {
+    const c = new Float32Array(12);
+    if (!peaks) return c;
     for (const p of peaks) {
       // Overtones 3, 5, 6, 7, 9 and 10 of a lower note fall on other pitch classes (5th,
       // major 3rd, flat 7th, 2nd); discount peaks that line up with a strong enough lower one.
@@ -94,14 +107,13 @@ export function chromaOf(samples, sampleRate) {
       for (const h of [3, 5, 6, 7, 9, 10]) {
         if (peaks.some((q) => q.m >= p.m * 0.4 && Math.abs(q.f * h - p.f) < p.f * 0.015)) w *= 0.35;
       }
-      const midi = 69 + 12 * Math.log2(p.f / 440);
-      c[((Math.round(midi) % 12) + 12) % 12] += w;
+      c[((Math.round(p.midi - tuning) % 12) + 12) % 12] += w;
     }
     const mx = Math.max(...c);
     if (mx > 0) for (let i = 0; i < 12; i++) c[i] /= mx;
     return c;
   });
-  return { t0: size / 2 / sr, hop: hop / sr, frames: out };
+  return { t0: size / 2 / sr, hop: hop / sr, frames: out, tuning: Math.round(tuning * 100) };
 }
 
 // Hits: sharp rises in spectral energy, each tagged kick (k), snare (s) or hi-hat (h)

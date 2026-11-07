@@ -1,5 +1,6 @@
 import { extractTrack, segmentNotes, livePitch, normalizeLoudness, acRms } from './pitch.js';
-import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing, detectTempo, beatsBetween, rankChords, METERS, barBeats, rateOf } from './theory.js';
+import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing, voiceLead, bassLine, detectTempo, beatsBetween, rankChords, METERS, barBeats, rateOf } from './theory.js';
+import { midiFile } from './midi.js';
 import { Synth } from './synth.js';
 import { tuneClip, targetFn } from './tune.js';
 import { analyze, classify, chromaOf, hitsOf, normalizePeak } from './sound.js';
@@ -18,6 +19,7 @@ const state = {
   take: null,
   keys: [],
   keyIdx: 0,
+  ideaIdx: 0, // which of the suggested progressions is showing
   rhythm: 'bar',
   palette: 'triads',
   harmony: null,
@@ -583,13 +585,51 @@ $('#demoBtn').addEventListener('click', () => {
 
 /* ---------- analysis ---------- */
 
+// Pitch tracking runs in a worker so the page stays smooth during a long take. If
+// the worker can't start (an older browser), it runs here as before.
+let trackWorker = null, jobSeq = 0;
+const trackJobs = new Map();
+function trackOf(samples, sr, onProgress) {
+  if (trackWorker === null) {
+    try {
+      trackWorker = new Worker(new URL('./track-worker.js', import.meta.url), { type: 'module' });
+      trackWorker.onmessage = ({ data }) => {
+        const job = trackJobs.get(data.id);
+        if (!job) return;
+        if ('progress' in data) { job.onProgress?.(data.progress); return; }
+        trackJobs.delete(data.id);
+        if (data.error) job.fallback(); else job.done(data.track);
+      };
+      trackWorker.onerror = (e) => {
+        e.preventDefault?.();
+        trackWorker = false;
+        for (const job of trackJobs.values()) job.fallback();
+        trackJobs.clear();
+      };
+    } catch {
+      trackWorker = false;
+    }
+  }
+  if (!trackWorker) return extractTrack(samples, sr, onProgress);
+  return new Promise((resolve) => {
+    const id = ++jobSeq;
+    trackJobs.set(id, {
+      onProgress,
+      done: resolve,
+      fallback: () => resolve(extractTrack(samples, sr, onProgress)),
+    });
+    // Copied, not transferred: the caller keeps using the samples.
+    trackWorker.postMessage({ id, samples, sr });
+  });
+}
+
 async function processAudio(samples, sampleRate, name, tempo = null) {
   setProcessing(true, 0.05);
   await nextFrame();
   const raw = samples.slice();
   normalizeLoudness(samples, sampleRate);
 
-  const track = await extractTrack(samples, sampleRate, (p) => setProcessing(true, 0.05 + p * 0.85));
+  const track = await trackOf(samples, sampleRate, (p) => setProcessing(true, 0.05 + p * 0.85));
   const { notes, offset, trace, traceT0, hop } = segmentNotes(track);
   // The main take is the tune everything is built on (sung, or played on any melodic
   // instrument); beats and chords go on top as layers.
@@ -646,10 +686,20 @@ function loadTake(take, saved = {}) {
   take.layers.forEach(prepareLayer);
   state.take = take;
   state.keys = detectKeys(analysisNotes(), playedSources());
-  state.keyIdx = Math.min(saved.keyIdx ?? 0, state.keys.length - 1);
+  // The saved key itself, not its place in the ranking (which can change as the
+  // analysis improves); older saves only have the key's name.
+  const savedKey = state.keys.findIndex((k) => saved.key
+    ? k.tonic === saved.key.tonic && k.mode === saved.key.mode
+    : saved.summary?.key && keyName(k) === saved.summary.key);
+  state.keyIdx = savedKey >= 0 ? savedKey : Math.min(saved.keyIdx ?? 0, state.keys.length - 1);
   state.rhythm = rateOf(saved.rhythm ?? state.rhythm);
   state.palette = { simple: 'triads', rich: 'chromatic' }[saved.palette] ?? saved.palette ?? state.palette;
   reharmonize();
+  const ideas = state.harmony.alternatives ?? [];
+  if (saved.idea > 0 && ideas[saved.idea]) {
+    state.ideaIdx = saved.idea;
+    state.harmony.segments = ideas[saved.idea];
+  }
   state.overrides = saved.overrides ?? {};
   // Chord timing the user edited by hand
   if (saved.segments?.length) {
@@ -700,8 +750,26 @@ function trustedTempo() {
 function reharmonize() {
   if (!state.take) return;
   state.overrides = {};
+  state.ideaIdx = 0;
   state.harmony = harmonize(analysisNotes(), state.keys[state.keyIdx], harmonyOptions());
+  // A detected beat grid takes the bar lines the harmony settled on (a pickup moves them).
+  const t = state.take.tempo;
+  if (t && state.harmony.downbeat != null && t.source !== 'countin' && !t.manual) t.downbeat = state.harmony.downbeat;
   markDirty();
+}
+
+// Shows the next of the suggested progressions.
+function nextIdea() {
+  const ideas = state.harmony?.alternatives ?? [];
+  if (ideas.length < 2) return;
+  stopPlayback();
+  state.ideaIdx = (state.ideaIdx + 1) % ideas.length;
+  state.harmony.segments = ideas[state.ideaIdx];
+  state.overrides = {};
+  markDirty();
+  renderHarmony();
+  toast(`Idea ${state.ideaIdx + 1} of ${ideas.length}`, 1400);
+  haptic();
 }
 
 // After the beat grid changed: re-fit chords to the new bar lines, unless the user
@@ -737,9 +805,19 @@ function retempo() {
   if (take.tempo && meter) take.tempo.meter = meter;
 }
 
+// The progression as it stands (with the user's picks), each chord with its bass
+// note: usually the root, sometimes an inversion that makes a smoother bass line.
 function resolvedSegments() {
   const { segments, vocab } = state.harmony;
-  return segments.map((s, i) => ({ ...s, chord: state.overrides[i] != null ? vocab[state.overrides[i]] : s.chord }));
+  const segs = segments.map((s, i) => ({ ...s, chord: state.overrides[i] != null ? vocab[state.overrides[i]] : s.chord }));
+  const bass = bassLine(segs.map((s) => s.chord));
+  return segs.map((s, i) => ({ ...s, bass: bass[i] }));
+}
+
+// "G/B" when the bass isn't the root.
+function chordLabel(s, key = state.keys[state.keyIdx]) {
+  if (s.bass == null || s.bass === s.chord.root) return s.chord.symbol;
+  return `${s.chord.symbol}/${spell(s.bass, key, s.chord.symbol.includes('♭'))}`;
 }
 
 // The timeline: the trimmed take, stretched to cover any layer that runs longer.
@@ -787,6 +865,9 @@ function renderHarmony() {
   const trimmed = take.trim.start > 0.05 || take.trim.end < take.duration - 0.05;
   $('#rollInfo').textContent = trimmed ? `${fmtTime(take.trim.start)}–${fmtTime(take.trim.end)}` : fmtTime(take.duration);
   $('#rollInfo').title = trimmed ? 'Trimmed section' : 'Recording length';
+  const ideaCount = state.harmony.alternatives?.length ?? 0;
+  $('#ideaBtn').hidden = ideaCount < 2 || editing || trimming;
+  $('#ideaText').textContent = `Idea ${state.ideaIdx + 1} of ${ideaCount}`;
   const tempoBtn = $('#tempoBtn');
   tempoBtn.hidden = !take.tempo;
   if (take.tempo) {
@@ -811,7 +892,7 @@ function renderHarmony() {
   });
 
   $('#chordList').innerHTML = segs
-    .map((s, i) => `<button class="chord-card ${s.edited || state.overrides[i] != null ? 'edited' : ''}" data-i="${i}"><span class="sym">${s.chord.symbol}</span><span class="rn">${s.chord.roman}</span></button>`)
+    .map((s, i) => `<button class="chord-card ${s.edited || state.overrides[i] != null ? 'edited' : ''}" data-i="${i}"><span class="sym">${chordLabel(s, key)}</span><span class="rn">${s.chord.roman}</span></button>`)
     .join('');
 
   const scale = scalePcs(key);
@@ -1024,7 +1105,8 @@ function drawRoll(playT = null) {
       g.fillStyle = active ? cGold : cSurface2;
       roundRect(g, sx, by, sw, band, 8);
       g.fill();
-      const label = g.measureText(s.chord.symbol).width < sw - 6 ? s.chord.symbol : sw > 14 ? s.chord.symbol[0] : '';
+      const full = chordLabel(s);
+      const label = g.measureText(full).width < sw - 6 ? full : g.measureText(s.chord.symbol).width < sw - 6 ? s.chord.symbol : sw > 14 ? s.chord.symbol[0] : '';
       g.fillStyle = active ? cInk : cText;
       g.fillText(label, sx + sw / 2, by + band / 2);
     }
@@ -1070,6 +1152,8 @@ $('#keyChips').addEventListener('click', (e) => {
   renderHarmony();
   haptic();
 });
+
+$('#ideaBtn').addEventListener('click', nextIdea);
 
 document.querySelectorAll('.seg[data-setting]').forEach((seg) =>
   seg.addEventListener('click', (e) => {
@@ -1118,7 +1202,7 @@ $('#trimApply').addEventListener('click', async () => {
   if (!take.track) {
     setProcessing(true, 0.1);
     await nextFrame();
-    take.track = await extractTrack(take.samples, take.sampleRate, (p) => setProcessing(true, 0.1 + p * 0.85));
+    take.track = await trackOf(take.samples, take.sampleRate, (p) => setProcessing(true, 0.1 + p * 0.85));
     setProcessing(false);
   }
   const frames = take.track.frames.filter((f) => f.t >= start && f.t <= end);
@@ -1379,9 +1463,12 @@ function scheduleClip(clip, clipStart, t0, start, end, dest) {
 // count-in already covers the first bar).
 function schedulePass(t0, a, b, buses, clickFrom = a) {
   const take = state.take;
-  for (const s of resolvedSegments()) {
-    if (s.end > a && s.start < b) synth.chord(voicing(s.chord), t0 + Math.max(0, s.start - a), Math.min(s.end, b) - Math.max(s.start, a), 1, buses.backing);
-  }
+  // Voiced as a whole, so each chord's notes move as little as possible from the last.
+  const segs = resolvedSegments();
+  const voices = voiceLead(segs.map((s) => s.chord), segs.map((s) => s.bass));
+  segs.forEach((s, i) => {
+    if (s.end > a && s.start < b) synth.chord(voices[i], t0 + Math.max(0, s.start - a), Math.min(s.end, b) - Math.max(s.start, a), 1, buses.backing);
+  });
   scheduleClip(voiceClip(take), 0, t0, a, b, buses.take);
   for (const l of take.layers) {
     if (kindOf(l) === 'rhythm' && l.sound === 'kit') {
@@ -1668,7 +1755,7 @@ async function stopLayer() {
 // it is, chroma and hits, and its audio levelled to suit that kind.
 async function analyzeRecording(raw, sr, offset, onProgress) {
   const forPitch = normalizeLoudness(raw.slice(), sr);
-  const track = await extractTrack(forPitch, sr, (f) => onProgress(f * 0.85));
+  const track = await trackOf(forPitch, sr, (f) => onProgress(f * 0.85));
   const seg = segmentNotes(track);
   await nextFrame();
   const sound = analyze(raw, sr, track);
@@ -2294,6 +2381,8 @@ async function saveTake(name) {
     })),
     mix: take.mix,
     keyIdx: state.keyIdx,
+    key: { tonic: key.tonic, mode: key.mode },
+    idea: state.ideaIdx,
     rhythm: state.rhythm,
     palette: state.palette,
     overrides: state.overrides,
@@ -2301,7 +2390,7 @@ async function saveTake(name) {
       ? resolvedSegments().map((s) => ({ start: s.start, end: s.end, chordId: s.chord.id, edited: !!s.edited }))
       : null,
     noteRev: take.noteRev,
-    summary: { key: keyName(key), chords: resolvedSegments().map((s) => s.chord.symbol), length: range.end - range.start },
+    summary: { key: keyName(key), chords: resolvedSegments().map((s) => chordLabel(s, key)), length: range.end - range.start },
   };
   // A layer with passes stores each pass's audio (the chosen one among them).
   const audio = {
@@ -2321,14 +2410,23 @@ async function saveTake(name) {
   }
 }
 
-$('#shareBtn').addEventListener('click', async () => {
+$('#shareBtn').addEventListener('click', () => {
   if (!state.take) return;
+  openSheet(`
+    <h3>Share</h3>
+    <button class="btn block" id="shareChart">Chord chart (text)</button>
+    <button class="btn primary block" id="shareMidi">MIDI file: melody, chords and bass</button>`);
+  $('#shareChart').addEventListener('click', () => { closeSheet(); shareChart(); });
+  $('#shareMidi').addEventListener('click', () => { closeSheet(); shareMidi(); });
+});
+
+async function shareChart() {
   const key = state.keys[state.keyIdx];
   const segs = resolvedSegments();
   const text = [
     state.take.name,
     `Key: ${keyName(key)}`,
-    `| ${segs.map((s) => s.chord.symbol).join(' | ')} |`,
+    `| ${segs.map((s) => chordLabel(s, key)).join(' | ')} |`,
     segs.map((s) => s.chord.roman).join(' – '),
     '',
     `Melody: ${state.take.notes.map((n) => spell(pc(n.midi), key)).join(' ')}`,
@@ -2343,7 +2441,49 @@ $('#shareBtn').addEventListener('click', async () => {
   } catch {
     toast("Couldn't copy the chord chart.");
   }
-});
+}
+
+// The melody (with any melody layers in the harmony), the chords and the bass line
+// as a MIDI file, laid on the take's beat grid so bars line up in a DAW.
+async function shareMidi() {
+  const take = state.take, key = state.keys[state.keyIdx];
+  const tempo = take.tempo ?? { bpm: 120, beat: 0.5, downbeat: 0, meter: '4/4' };
+  const { start, end } = takeRange();
+  const bar = tempo.beat * barBeats(tempo.meter);
+  // Start the file on the bar line at or before the first sound.
+  const origin = tempo.downbeat + Math.floor((start - tempo.downbeat) / bar + 1e-6) * bar;
+  const pulses = (t) => (t - origin) / tempo.beat;
+  const segs = resolvedSegments();
+  const voices = voiceLead(segs.map((s) => s.chord), segs.map((s) => s.bass));
+  const melody = analysisNotes()
+    .filter((n) => n.end > start && n.start < end)
+    .map((n) => ({ midi: n.midi, t: pulses(n.start), dur: (n.end - n.start) / tempo.beat, vel: 100 }));
+  const chords = [], bass = [];
+  segs.forEach((s, i) => {
+    const t = pulses(s.start), dur = (s.end - s.start) / tempo.beat;
+    voices[i].slice(1).forEach((m) => chords.push({ midi: m, t, dur, vel: 70 }));
+    bass.push({ midi: voices[i][0], t, dur, vel: 85 });
+  });
+  const blob = midiFile({
+    bpm: tempo.bpm, meter: tempo.meter ?? '4/4', key,
+    tracks: [
+      { name: 'Melody', channel: 0, program: 0, notes: melody },
+      { name: 'Chords', channel: 1, program: 4, notes: chords },
+      { name: 'Bass', channel: 2, program: 33, notes: bass },
+    ],
+  });
+  const name = `${(take.name || 'Alchemy').replace(/[\\/:*?"<>|]+/g, '').trim() || 'Alchemy'}.mid`;
+  const file = new File([blob], name, { type: 'audio/midi' });
+  if (navigator.canShare?.({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: name }); return; } catch (err) { if (err.name === 'AbortError') return; }
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+  toast('MIDI file saved');
+}
 
 /* ---------- library ---------- */
 

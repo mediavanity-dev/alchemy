@@ -144,15 +144,33 @@ export function mpm(frame, rate) {
   let maxV = 0;
   for (const p of peaks) if (p >= minLag && nsdf[p] > maxV) maxV = nsdf[p];
   const threshold = 0.9 * maxV;
-  for (const p of peaks) {
-    if (p < minLag || nsdf[p] < threshold) continue;
+  const refine = (p) => {
     const a = nsdf[p - 1], b = nsdf[p], c = nsdf[p + 1];
     const den = a - 2 * b + c;
     const shift = den !== 0 ? (0.5 * (a - c)) / den : 0;
-    const clarity = Math.min(1, b - 0.25 * (a - c) * shift);
-    return { freq: rate / (p + shift), clarity };
+    return { freq: rate / (p + shift), clarity: Math.min(1, b - 0.25 * (a - c) * shift) };
+  };
+  let pick = null;
+  for (const p of peaks) {
+    if (p < minLag || nsdf[p] < threshold) continue;
+    pick = refine(p);
+    break;
   }
-  return null;
+  if (!pick) return null;
+  // Other readings note tracking can fall back on: shorter periods that just missed
+  // the cut (the octave or fifth above, when a strong overtone fooled the pick), and
+  // a longer period that is clearly stronger than the pick (the octave below).
+  // Multiples of the true period are always nearly as strong, so longer periods
+  // only count when they beat the pick outright.
+  const others = [];
+  for (const p of peaks) {
+    if (p < minLag || Math.abs(rate / p - pick.freq) < pick.freq * 0.03) continue;
+    const r = refine(p);
+    if (r.freq > pick.freq && nsdf[p] >= 0.5 * maxV) others.push({ ...r, weight: (r.clarity / pick.clarity) ** 4 });
+    else if (r.freq < pick.freq && r.clarity > pick.clarity + 0.04) others.push({ ...r, weight: 0.3 });
+  }
+  others.sort((a, b) => b.weight - a.weight);
+  return { ...pick, others: others.slice(0, 3) };
 }
 
 // Quick estimate for the live meter while recording.
@@ -185,6 +203,8 @@ export async function extractTrack(samples, sr, onProgress) {
       env: rmsOf(data.subarray(mid - (shortLen >> 1), mid + (shortLen >> 1))),
       midi: p ? freqToMidi(p.freq) : null,
       clarity: p ? p.clarity : 0,
+      // Alternative readings: [midi, weight relative to the main one]
+      alt: p?.others.length ? p.others.map((o) => [freqToMidi(o.freq), o.weight]) : null,
     });
     if (k % 150 === 149) {
       onProgress?.(k / count);
@@ -209,7 +229,7 @@ export function segmentNotes({ frames, hop }) {
     f.midi != null && f.rms >= gate && f.clarity >= 0.78 && f.midi > 26 && f.midi < 100 ? f.midi : null
   );
 
-  // Median filter removes single-frame octave slips.
+  // Median filter, for the drawn pitch curve and the tuning estimate.
   const med = raw.map((v, i) => {
     if (v == null) return null;
     const w = [];
@@ -218,26 +238,20 @@ export function segmentNotes({ frames, hop }) {
     return w[w.length >> 1];
   });
 
-  // Singers rarely sit on A440; find their personal tuning so notes snap sensibly.
-  let sx = 0, sy = 0;
-  for (const v of med) {
-    if (v == null) continue;
-    const a = 2 * Math.PI * (v - Math.round(v));
-    sx += Math.cos(a); sy += Math.sin(a);
-  }
-  const offset = sx || sy ? Math.atan2(sy, sx) / (2 * Math.PI) : 0;
-
-  const q = med.map((v) => (v == null ? null : Math.round(v - offset)));
+  const { offset, local } = tuningOf(med, hop);
+  const path = trackNotes(frames, gate, local, hop);
 
   let runs = [];
-  for (let i = 0; i < q.length; i++) {
-    if (q[i] == null) continue;
+  for (let i = 0; i < path.length; i++) {
+    const p = path[i];
+    if (p == null) continue;
+    const v = path.vals[i];
     const last = runs[runs.length - 1];
-    if (last && last.e === i - 1 && last.p === q[i]) {
+    if (last && last.e === i - 1 && last.p === p) {
       last.e = i;
-      last.vals.push(med[i] - offset);
+      last.vals.push(v);
     } else {
-      runs.push({ s: i, e: i, p: q[i], vals: [med[i] - offset] });
+      runs.push({ s: i, e: i, p, vals: [v] });
     }
   }
 
@@ -264,6 +278,26 @@ export function segmentNotes({ frames, hop }) {
       runs.splice(idx, 1);
     } else {
       runs.splice(idx, 1);
+    }
+  }
+
+  // A wide vibrato can dip into the next semitone for half a cycle. That reads as a
+  // short "note" a semitone from its neighbour that never settles: it leans back
+  // towards the neighbour instead of sitting in its own centre. Give it back.
+  const center = (r) => { const v = [...r.vals].sort((a, b) => a - b); return v[v.length >> 1]; };
+  const maxWobble = Math.ceil(0.25 / hop);
+  for (let i = 0; i < runs.length; i++) {
+    const r = runs[i];
+    if (r.e - r.s + 1 > maxWobble) continue;
+    const lean = center(r) - r.p;
+    for (const j of [i - 1, i + 1]) {
+      const nb = runs[j];
+      if (!nb || Math.abs(nb.p - r.p) !== 1 || (j < i ? nb.e + 1 !== r.s : r.e + 1 !== nb.s)) continue;
+      if (Math.sign(lean) !== Math.sign(nb.p - r.p) || Math.abs(lean) < 0.3) continue;
+      if (j < i) { nb.e = r.e; nb.vals.push(...r.vals); } else { nb.s = r.s; nb.vals.unshift(...r.vals); }
+      runs.splice(i, 1);
+      i--;
+      break;
     }
   }
 
@@ -304,7 +338,7 @@ export function segmentNotes({ frames, hop }) {
 
   const notes = split
     .map((r) => {
-      const own = r.vals.filter((v) => Math.abs(v - r.p) <= 0.5);
+      const own = r.vals.filter((v) => Math.abs(v - r.p) <= 0.6);
       const avg = own.length ? own.reduce((a, b) => a + b, 0) / own.length : r.p;
       return {
         start: frames[r.s].t - hop / 2,
@@ -315,8 +349,144 @@ export function segmentNotes({ frames, hop }) {
     })
     .filter((n) => n.end - n.start >= 0.09);
 
+  // The pitch curve, relative to the take's overall tuning. Inside notes it follows
+  // the reading the tracker chose, so octave slips don't show.
   const trace = new Float32Array(med.length);
-  med.forEach((v, i) => (trace[i] = v == null ? NaN : v - offset));
+  med.forEach((v, i) => {
+    const chosen = path[i] != null ? path.vals[i] + local[i] : null;
+    trace[i] = chosen != null ? chosen - offset : v == null ? NaN : v - offset;
+  });
 
   return { notes, offset: Math.round(offset * 100), trace, traceT0: frames[0].t, hop };
+}
+
+// Singers rarely sit on A440, and unaccompanied ones drift (usually flat) as they go.
+// The tuning is the circular mean of how far each pitch sits from equal temperament:
+// over the whole take (reported as the singer's tuning) and over a few seconds
+// around each frame (used to decide which note each pitch is), followed smoothly so
+// it never jumps a whole semitone.
+// Vibrato is averaged out first (over about one cycle), and steady stretches count
+// most: a wide vibrato spends its time near the edges of the note, which read
+// frame by frame would put the tuning half a semitone out.
+function tuningOf(med, hop) {
+  const n = med.length;
+  const avg = Math.max(1, Math.round(0.1 / hop)), k = Math.max(1, Math.round(0.05 / hop));
+  const smooth = new Array(n).fill(null);
+  for (let i = 0; i < n; i++) {
+    if (med[i] == null) continue;
+    let s = 0, c = 0;
+    for (let j = i; j >= Math.max(0, i - avg) && med[j] != null; j--) { s += med[j]; c++; }
+    for (let j = i + 1; j <= Math.min(n - 1, i + avg) && med[j] != null; j++) { s += med[j]; c++; }
+    smooth[i] = s / c;
+  }
+  const cx = new Float64Array(n + 1), cy = new Float64Array(n + 1), cn = new Float64Array(n + 1);
+  for (let i = 0; i < n; i++) {
+    const v = smooth[i], a = smooth[i - k], b = smooth[i + k];
+    // Weight by how steady the pitch is here (glides between notes count little).
+    const w = v == null ? 0 : a == null || b == null ? 0.3 : Math.exp(-(((b - a) / 0.3) ** 2));
+    const ang = v == null ? 0 : 2 * Math.PI * (v - Math.round(v));
+    cx[i + 1] = cx[i] + w * Math.cos(ang);
+    cy[i + 1] = cy[i] + w * Math.sin(ang);
+    cn[i + 1] = cn[i] + w;
+  }
+  const angle = (x, y) => (x || y ? Math.atan2(y, x) / (2 * Math.PI) : 0);
+  const offset = angle(cx[n], cy[n]);
+  const local = new Float32Array(n);
+  const half = Math.round(DRIFT_WINDOW / 2 / hop), minFrames = Math.round(1.5 / hop);
+  const gx = Math.cos(2 * Math.PI * offset), gy = Math.sin(2 * Math.PI * offset);
+  let prev = offset;
+  for (let i = 0; i < n; i++) {
+    const a = Math.max(0, i - half), b = Math.min(n, i + half + 1);
+    const cnt = cn[b] - cn[a];
+    // Lean on the whole take's tuning where the window holds little singing.
+    const prior = Math.max(0, 3 * minFrames - cnt);
+    let o = angle(cx[b] - cx[a] + prior * gx, cy[b] - cy[a] + prior * gy);
+    o += Math.round(prev - o); // unwrap: stay continuous with the frame before
+    local[i] = prev = o;
+  }
+  return { offset, local };
+}
+
+const DRIFT_WINDOW = 8; // seconds
+const LO_NOTE = 28, HI_NOTE = 99;
+
+// Note tracking as a hidden Markov model (in the spirit of pYIN): each frame is
+// either silence or one of the semitones, and a Viterbi search finds the most
+// likely path. A frame's pitch readings (the main one and its octave alternatives)
+// say how likely each note is; changing note costs something, so vibrato, scoops
+// and one-frame octave slips stay inside the note they belong to, while a real
+// new note wins after a few frames.
+// Returns, per frame, the note (or null) and the reading used for it, both relative
+// to the local tuning.
+function trackNotes(frames, gate, local, hop) {
+  const P = HI_NOTE - LO_NOTE + 1, S = P + 1; // state 0 is silence
+  const T = frames.length;
+  const SIGMA = 0.45, FLOOR = Math.log(0.01);
+  // Costs are set for 12.5 ms frames and scaled for others.
+  const k = Math.min(2, Math.max(0.5, 0.0125 / hop));
+  const CHANGE = -5 * k, PER_SEMI = -0.1 * k, VOICE = -2.5 * k;
+
+  const cands = frames.map((f, i) => {
+    if (f.midi == null || f.rms < gate) return null;
+    const list = [[f.midi - local[i], 1]];
+    if (f.alt) for (const [m, w] of f.alt) list.push([m - local[i], w]);
+    return list;
+  });
+  const voiced = frames.map((f) => (f.midi == null || f.rms < gate ? 0 : Math.min(1, Math.max(0, (f.clarity - 0.7) / 0.2))));
+
+  const emit = new Float32Array(S);
+  const fill = (i) => {
+    const v = voiced[i], list = cands[i];
+    emit[0] = Math.log(1 - 0.98 * v + 1e-3);
+    if (!v) { emit.fill(Math.log(1e-6), 1); return; }
+    const base = Math.log(0.98 * v);
+    for (let p = 1; p < S; p++) {
+      let L = 0;
+      for (const [m, w] of list) {
+        const d = (m - (LO_NOTE + p - 1)) / SIGMA;
+        if (d > -4 && d < 4) L = Math.max(L, w * Math.exp(-0.5 * d * d));
+      }
+      emit[p] = base + Math.max(Math.log(L + 1e-9), FLOOR);
+    }
+  };
+
+  let prev = new Float32Array(S), cur = new Float32Array(S);
+  const back = new Uint8Array(T * S);
+  fill(0);
+  for (let p = 0; p < S; p++) prev[p] = emit[p] + (p ? VOICE : 0);
+  for (let i = 1; i < T; i++) {
+    fill(i);
+    let best0 = prev[0], b0 = 0;
+    for (let p = 1; p < S; p++) if (prev[p] + VOICE > best0) { best0 = prev[p] + VOICE; b0 = p; }
+    cur[0] = best0 + emit[0];
+    back[i * S] = b0;
+    const fromSil = prev[0] + VOICE;
+    for (let p = 1; p < S; p++) {
+      let best = prev[p], bp = p;
+      if (fromSil > best) { best = fromSil; bp = 0; }
+      for (let q = 1; q < S; q++) {
+        if (q === p) continue;
+        const v = prev[q] + CHANGE + PER_SEMI * Math.min(12, Math.abs(q - p));
+        if (v > best) { best = v; bp = q; }
+      }
+      cur[p] = best + emit[p];
+      back[i * S + p] = bp;
+    }
+    [prev, cur] = [cur, prev];
+  }
+
+  let state = 0;
+  for (let p = 1; p < S; p++) if (prev[p] > prev[state]) state = p;
+  const path = new Array(T).fill(null);
+  path.vals = new Array(T).fill(null);
+  for (let i = T - 1; i >= 0; i--) {
+    if (state) {
+      const note = LO_NOTE + state - 1;
+      let bestV = null;
+      for (const [m] of cands[i] ?? []) if (bestV == null || Math.abs(m - note) < Math.abs(bestV - note)) bestV = m;
+      if (bestV != null && Math.abs(bestV - note) < 1.5) { path[i] = note; path.vals[i] = bestV; }
+    }
+    state = i ? back[i * S + state] : 0;
+  }
+  return path;
 }

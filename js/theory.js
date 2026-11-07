@@ -5,13 +5,49 @@ const FLAT = ['C', 'D♭', 'D', 'E♭', 'E', 'F', 'G♭', 'G', 'A♭', 'A', 'B�
 const FLAT_MAJOR = new Set([5, 10, 3, 8, 1]);
 const FLAT_MINOR = new Set([2, 7, 0, 5, 10, 3]);
 
-// Krumhansl–Kessler key profiles.
-const MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
-const MINOR_PROFILE = [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+// Key profiles: how often each degree of the scale turns up. Sung notes are scored
+// against Temperley's profiles from the Essen folksong collection (Music and
+// Probability, 2007), which describe single melodic lines; played chords against
+// his Kostka–Payne profiles, which come from harmony.
+const PROFILES = {
+  melody: {
+    major: [0.184, 0.001, 0.155, 0.003, 0.191, 0.109, 0.005, 0.214, 0.001, 0.078, 0.004, 0.055],
+    minor: [0.192, 0.005, 0.149, 0.179, 0.002, 0.144, 0.002, 0.201, 0.038, 0.012, 0.053, 0.022],
+  },
+  chords: {
+    major: [0.748, 0.06, 0.488, 0.082, 0.67, 0.46, 0.096, 0.715, 0.104, 0.366, 0.057, 0.4],
+    minor: [0.712, 0.084, 0.474, 0.618, 0.049, 0.46, 0.105, 0.747, 0.404, 0.067, 0.133, 0.33],
+  },
+};
+// Dorian is minor with a natural 6th and a flat 7th; Mixolydian is major with a flat
+// 7th. The note that gives each mode its colour gets the weight of an ordinary
+// scale note (the major 6th's, the minor 7th's), and the note it replaces becomes rare.
+for (const set of Object.values(PROFILES)) {
+  const dor = [...set.minor], mix = [...set.major];
+  dor[9] = Math.max(set.major[9], set.minor[8]); dor[8] = Math.min(set.minor[8], set.minor[9]);
+  dor[10] = Math.max(set.minor[10], set.minor[11]); dor[11] = Math.min(set.minor[10], set.minor[11]);
+  mix[10] = Math.max(set.minor[10], set.major[11]); mix[11] = Math.min(set.major[10], set.major[11]);
+  Object.assign(set, { dorian: dor, mixolydian: mix });
+}
+// As log probabilities, mixed with a little of the uniform distribution so a blue
+// note or a chromatic passing note costs something but never rules a key out.
+const LOGP = Object.fromEntries(Object.entries(PROFILES).map(([name, set]) => [name,
+  Object.fromEntries(Object.entries(set).map(([mode, prof]) => {
+    const sum = prof.reduce((a, b) => a + b, 0);
+    return [mode, prof.map((v) => Math.log(0.9 * (v / sum) + 0.1 / 12))];
+  }))]));
+export const MODES = ['major', 'minor', 'dorian', 'mixolydian'];
+// Starting odds (in log units): the modes have to be asked for by the notes, a few
+// sung natural 6ths or flat 7ths, before they win over plain major or minor.
+const MODE_PRIOR = { major: 0, minor: -0.2, dorian: -0.8, mixolydian: -0.8 };
+// Where each mode's key signature comes from (its major scale), in semitones up from the tonic.
+const PARENT = { major: 0, minor: 3, dorian: 10, mixolydian: 5 };
 
 const SCALES = {
   major: [0, 2, 4, 5, 7, 9, 11],
   minor: [0, 2, 3, 5, 7, 8, 10, 11],
+  dorian: [0, 2, 3, 5, 7, 9, 10],
+  mixolydian: [0, 2, 4, 5, 7, 9, 10],
 };
 
 const QUALITIES = {
@@ -55,6 +91,25 @@ const VOCAB = {
     [5, 'maj', 'IV', 'S', 0.35, 2], [1, 'maj', '♭II', 'S', 0.2, 2],
     [7, 'sus4', 'Vsus4', 'D', 0.35, 1], [0, 'madd9', 'i(add9)', 'T', 0.35, 1], [8, 'add9', 'VIadd9', 'S', 0.3, 1],
   ],
+  // The major IV is what makes Dorian sound Dorian (i – IV, as in so much funk and folk).
+  dorian: [
+    [0, 'min', 'i', 'T', 1.0], [2, 'min', 'ii', 'S', 0.45], [3, 'maj', '♭III', 'T', 0.55],
+    [5, 'maj', 'IV', 'S', 0.95], [7, 'min', 'v', 'D', 0.6], [9, 'dim', 'vi°', 'S', 0.1],
+    [10, 'maj', '♭VII', 'D', 0.8],
+    [0, 'm7', 'i7', 'T', 0.65, 1], [5, 'dom7', 'IV7', 'S', 0.55, 1], [2, 'm7', 'ii7', 'S', 0.4, 1],
+    [3, 'maj7', '♭IIImaj7', 'T', 0.4, 1], [7, 'm7', 'v7', 'D', 0.4, 1], [0, 'madd9', 'i(add9)', 'T', 0.35, 1],
+    [7, 'maj', 'V', 'D', 0.35, 2], [8, 'maj', '♭VI', 'S', 0.25, 2], [5, 'min', 'iv', 'S', 0.25, 2],
+  ],
+  // The flat VII is Mixolydian's signature (I – ♭VII – IV).
+  mixolydian: [
+    [0, 'maj', 'I', 'T', 1.0], [2, 'min', 'ii', 'S', 0.5], [4, 'dim', 'iii°', 'T', 0.1],
+    [5, 'maj', 'IV', 'S', 0.9], [7, 'min', 'v', 'D', 0.6], [9, 'min', 'vi', 'T', 0.5],
+    [10, 'maj', '♭VII', 'S', 0.9],
+    [0, 'dom7', 'I7', 'T', 0.6, 1], [7, 'm7', 'v7', 'D', 0.4, 1], [2, 'm7', 'ii7', 'S', 0.4, 1],
+    [5, 'maj7', 'IVmaj7', 'S', 0.4, 1], [10, 'maj7', '♭VIImaj7', 'S', 0.35, 1], [0, 'sus4', 'Isus4', 'T', 0.3, 1],
+    [0, 'add9', 'Iadd9', 'T', 0.35, 1],
+    [7, 'maj', 'V', 'D', 0.4, 2], [3, 'maj', '♭III', 'S', 0.25, 2], [5, 'min', 'iv', 'S', 0.3, 2],
+  ],
 };
 
 // How often the chord can change ("harmonic rhythm"): every 2 bars, every bar,
@@ -76,7 +131,10 @@ const PASS_WEIGHT = 0.35;
 export const pc = (m) => ((Math.round(m) % 12) + 12) % 12;
 
 export function spell(p, key, preferFlat = false) {
-  const flats = preferFlat || (key && (key.mode === 'major' ? FLAT_MAJOR : FLAT_MINOR).has(key.tonic));
+  const flats = preferFlat || (key && (
+    key.mode === 'major' ? FLAT_MAJOR.has(key.tonic)
+      : key.mode === 'minor' ? FLAT_MINOR.has(key.tonic)
+      : FLAT_MAJOR.has((key.tonic + PARENT[key.mode]) % 12)));
   return (flats ? FLAT : SHARP)[((p % 12) + 12) % 12];
 }
 
@@ -84,43 +142,51 @@ export const keyName = (key) => `${spell(key.tonic, key)} ${key.mode}`;
 export const noteLabel = (m, key) => spell(pc(m), key) + (Math.floor(Math.round(m) / 12) - 1);
 export const scalePcs = (key) => new Set(SCALES[key.mode].map((d) => (key.tonic + d) % 12));
 
-function pearson(a, b) {
-  const n = a.length;
-  const ma = a.reduce((s, v) => s + v, 0) / n;
-  const mb = b.reduce((s, v) => s + v, 0) / n;
-  let num = 0, da = 0, db = 0;
-  for (let i = 0; i < n; i++) {
-    num += (a[i] - ma) * (b[i] - mb);
-    da += (a[i] - ma) ** 2;
-    db += (b[i] - mb) ** 2;
-  }
-  return da && db ? num / Math.sqrt(da * db) : 0;
-}
-
-// Returns all 24 keys ranked, each with a probability `p`.
-// `played`: chroma from instrument layers (see sound.js), counted alongside the notes.
+// All keys (12 tonics in each mode) ranked, each with a probability `p`.
+// Scored as how likely the notes are under each key's profile (each note counting
+// about once, long ones up to twice), plus the pull of ending (and starting) on the
+// home note. `played`: chroma from instrument layers (see sound.js), scored
+// against the harmony profiles.
 export function detectKeys(notes, played = []) {
-  const hist = new Array(12).fill(0);
-  for (const n of notes) hist[pc(n.midi)] += Math.min(n.end - n.start, 1.5);
-  for (const src of played) for (const f of src.frames) for (let k = 0; k < 12; k++) hist[k] += f[k] * src.hop * 1.5;
+  const mel = new Array(12).fill(0), harm = new Array(12).fill(0);
+  const durs = notes.map((n) => n.end - n.start).sort((a, b) => a - b);
+  const med = durs[durs.length >> 1] || 0.3;
+  for (const n of notes) mel[pc(n.midi)] += Math.min(2, Math.max(0.5, (n.end - n.start) / med));
+  for (const src of played) {
+    for (const f of src.frames) {
+      let sum = 0;
+      for (let k = 0; k < 12; k++) sum += f[k];
+      // A sounding chord counts as about one note every half second, shared among its notes.
+      if (sum > 0) for (let k = 0; k < 12; k++) harm[k] += (f[k] / sum) * (src.hop / 0.5);
+    }
+  }
   const first = notes.length ? pc(notes[0].midi) : -1;
   const last = notes.length ? pc(notes[notes.length - 1].midi) : -1;
 
   const keys = [];
   for (let t = 0; t < 12; t++) {
-    for (const mode of ['major', 'minor']) {
-      const prof = mode === 'major' ? MAJOR_PROFILE : MINOR_PROFILE;
-      const rot = hist.map((_, i) => prof[(i - t + 12) % 12]);
-      let r = pearson(hist, rot);
-      if (last === t) r += 0.06;
-      if (first === t) r += 0.03;
+    for (const mode of MODES) {
+      const lm = LOGP.melody[mode], lh = LOGP.chords[mode];
+      let r = 0;
+      for (let k = 0; k < 12; k++) {
+        const d = (k - t + 12) % 12;
+        r += mel[k] * lm[d] + harm[k] * lh[d];
+      }
+      if (last === t) r += 1;
+      if (first === t) r += 0.4;
       keys.push({ tonic: t, mode, r });
     }
   }
+  // Notes in a tune aren't independent, so the evidence is tempered before it
+  // becomes a probability; otherwise every long take would claim certainty. The
+  // modes' starting odds apply after that, so they hold however long the take.
+  const weight = mel.reduce((a, b) => a + b, 0) + harm.reduce((a, b) => a + b, 0);
+  const temp = Math.max(1, 0.5 * Math.sqrt(weight));
+  for (const k of keys) k.r = k.r / temp + MODE_PRIOR[k.mode];
   keys.sort((a, b) => b.r - a.r);
   const top = keys[0].r;
   let sum = 0;
-  for (const k of keys) { k.p = Math.exp((k.r - top) / 0.12); sum += k.p; }
+  for (const k of keys) { k.p = Math.exp(k.r - top); sum += k.p; }
   for (const k of keys) k.p /= sum;
   return keys;
 }
@@ -350,96 +416,250 @@ function emission(c, win, scale) {
   return s / win.total + 0.25 * c.prior + fit - (c.tones.length > 3 ? 0.08 : 0) - unsung - (c.chromatic ? 0.05 : 0);
 }
 
-const FUNC_MOVES = { TS: 0.12, SD: 0.18, DT: 0.25, ST: 0.04, TD: 0.06, DS: -0.15, TT: -0.02, DD: 0.02, SS: 0 };
+// Function-to-function moves (Tonic, Subdominant, Dominant). Pop and rock use V – IV
+// freely (de Clercq & Temperley's rock corpus), so it is only a whisker below neutral.
+const FUNC_MOVES = { TS: 0.12, SD: 0.18, DT: 0.25, ST: 0.06, TD: 0.06, DS: -0.03, TT: -0.02, DD: 0.02, SS: 0 };
 
 function transition(a, b) {
   if (a === b) return 0.05;
   let s = 0;
   const iv = (b.root - a.root + 12) % 12;
+  // Roots moving by fourths and fifths are the most common changes of all, then steps.
   if (iv === 5) s += 0.22;
+  else if (iv === 7) s += 0.12;
   else if (iv === 2 || iv === 10) s += 0.06;
-  else if (iv === 7) s += 0.04;
   if (a.root === b.root) s -= 0.05;
   return s + (FUNC_MOVES[a.func + b.func] || 0);
 }
 
+// Three-chord moves heard so often they're worth a nudge, by scale degree and
+// chord type ('m' minor, 'd' diminished; 7ths and colours count as their triad).
+const IDIOMS = {
+  major: ['0 5 7', '5 7 0', '2m 7 0', '0 7 9m', '7 9m 5', '9m 5 0', '0 9m 5', '9m 5 7', '5 0 7', '0 9m 2m',
+    '9m 2m 7', '0 10 5', '10 5 0', '5 5m 0', '4m 9m 2m', '0 4m 5', '7 5 0', '0 5 0', '0 7 0', '2 7 0'],
+  minor: ['0m 5m 7', '5m 7 0m', '0m 8 10', '8 10 0m', '0m 10 8', '10 8 7', '0m 8 3', '8 3 10', '3 10 0m',
+    '2d 7 0m', '0m 5m 0m', '0m 7 0m', '0m 3 10', '5m 10 3', '8 7 0m', '0m 10 0m'],
+  dorian: ['0m 5 0m', '0m 10 5', '10 5 0m', '0m 3 5', '0m 5 10', '5 10 0m', '0m 2m 0m', '0m 7m 0m', '3 10 0m'],
+  mixolydian: ['0 10 5', '10 5 0', '0 10 0', '0 5 10', '5 10 0', '0 7m 5', '0 10 7m'],
+};
+const IDIOM_SETS = Object.fromEntries(Object.entries(IDIOMS).map(([m, l]) => [m, new Set(l)]));
+const IDIOM_BONUS = 0.15;
+const triadId = (c) => `${c.deg}${{ min: 'm', m7: 'm', madd9: 'm', dim: 'd', m7b5: 'd' }[c.quality] ?? ''}`;
+
 // Viterbi search over the chord vocabulary: each window's chord should fit the
-// notes sung over it, and the sequence should move like a real progression.
-// Pass `tempo` only when its beat grid can be trusted (a count-in, or set by hand).
+// notes sung over it, and the sequence should move like a real progression. The
+// search remembers the chord before the current one, so familiar three-chord moves
+// can be favoured.
+// A tempo from a count-in or set by hand is trusted as is; a detected one is too
+// for the beat, but which beat starts the bar is tried every way.
 // `played`: chroma from instrument layers whose chords should guide the choice.
-export function harmonize(notes, key, { rhythm: rate = 'bar', palette = 'triads', tempo = null, played = [] } = {}) {
+// Returns the best progression, plus up to `ideas` - 1 different ones in
+// `alternatives` (the best one first).
+export function harmonize(notes, key, { rhythm: rate = 'bar', palette = 'triads', tempo = null, played = [], ideas = 4 } = {}) {
   const rhythm = rateOf(rate);
   const all = buildVocab(key);
   const vocab = choicesFor(all, palette);
   const scale = scalePcs(key);
-  const ann = annotate(notes, tempo);
   // The harmony covers the melody and any stretch where an instrument plays on its own.
   let t0 = notes.length ? notes[0].start : Infinity, t1 = notes.length ? notes[notes.length - 1].end : -Infinity;
   for (const src of played) {
     const on = src.frames.map((f, i) => (f.some((v) => v > 0) ? src.t0 + i * src.hop : null)).filter((t) => t != null);
     if (on.length) { t0 = Math.min(t0, on[0]); t1 = Math.max(t1, on[on.length - 1] + src.hop); }
   }
-  if (!(t1 > t0)) return { vocab: all, segments: [] };
-  const wins = (tempo ? makeGridWindows(ann, rhythm, tempo, [t0, t1]) : makeWindows(ann, rhythm, [t0, t1], changePoints(played)))
-    .map((w) => ({ ...w, played: playedOver(played, w.start, w.end) }));
-  const E = wins.map((w) => vocab.map((c) => emission(c, w, scale)));
-  const N = vocab.length, T = wins.length, TW = 0.4;
-  const isTonic = (c) => c.deg === 0 && c.func === 'T';
+  if (!(t1 > t0)) return { vocab: all, segments: [], alternatives: [], downbeat: null };
+  const changes = changePoints(played);
+  const idioms = IDIOM_SETS[key.mode];
 
-  let prev = vocab.map((c, j) => E[0][j] + (isTonic(c) ? 0.3 : 0));
-  const back = [];
-  for (let t = 1; t < T; t++) {
-    const cur = new Array(N), bp = new Array(N);
-    const empty = wins[t].total <= 1e-6 && !wins[t].played;
-    for (let j = 0; j < N; j++) {
-      let best = -Infinity, bi = 0;
-      for (let i = 0; i < N; i++) {
-        let v = prev[i] + TW * transition(vocab[i], vocab[j]);
-        if (empty && i === j) v += 0.6;
-        // Changes inside the bar need the notes to ask for them a little.
-        if (i === j && wins[t].level) v += wins[t].level === 1 ? HOLD.half : HOLD.beat;
-        if (v > best) { best = v; bi = i; }
+  const attempt = (tp) => {
+    const ann = annotate(notes, tp);
+    const wins = (tp ? makeGridWindows(ann, rhythm, tp, [t0, t1]) : makeWindows(ann, rhythm, [t0, t1], changes))
+      .map((w) => ({ ...w, played: playedOver(played, w.start, w.end) }));
+    const E = wins.map((w) => vocab.map((c) => emission(c, w, scale)));
+    const ties = tieRepeats(E, wins, ann);
+    const best = decode(E, wins, vocab, idioms);
+    best.path = repeatChords(best.path, ties);
+    return { tp, wins, E, ties, best };
+  };
+  const trusted = tempo && (tempo.source === 'countin' || tempo.manual);
+  const run = attempt(tempo && !trusted ? { ...tempo, downbeat: findDownbeat(notes, tempo) } : tempo);
+  const { wins, E, ties } = run;
+
+  // Other ideas: search again with the chords already suggested for each window
+  // made a little less attractive, keeping results that differ for at least a
+  // quarter of the time from every idea so far.
+  const paths = [run.best.path];
+  const used = wins.map(() => new Float32Array(vocab.length));
+  let last = run.best.path;
+  for (let tries = 0; paths.length < ideas && tries < ideas * 3; tries++) {
+    last.forEach((j, t) => (used[t][j] += 1));
+    const E2 = E.map((row, t) => row.map((v, j) => v - 0.45 * used[t][j]));
+    last = repeatChords(decode(E2, wins, vocab, idioms).path, ties);
+    const span = (p, q) => p.reduce((a, j, t) => a + (j === q[t] ? 0 : wins[t].end - wins[t].start), 0);
+    if (paths.every((p) => span(p, last) >= 0.25 * (t1 - t0))) paths.push(last);
+  }
+
+  const toSegments = (path) => {
+    const segments = [];
+    path.forEach((j, t) => {
+      const prev = segments[segments.length - 1];
+      if (prev && prev.chord === vocab[j]) {
+        prev.end = wins[t].end;
+        prev.wins.push(t);
+      } else {
+        segments.push({ chord: vocab[j], start: wins[t].start, end: wins[t].end, wins: [t] });
       }
-      cur[j] = best + E[t][j];
-      bp[j] = bi;
+    });
+    for (const seg of segments) {
+      const ranked = vocab
+        .map((c, j) => ({ chord: c, score: seg.wins.reduce((a, t) => a + E[t][j], 0) / seg.wins.length }))
+        .sort((a, b) => b.score - a.score);
+      const alts = ranked.slice(0, 6);
+      if (!alts.some((a) => a.chord === seg.chord)) alts[alts.length - 1] = ranked.find((a) => a.chord === seg.chord);
+      seg.alts = alts;
+      const pcs = new Set();
+      seg.wins.forEach((t) => wins[t].items.forEach((it) => pcs.add(it.pc)));
+      seg.pcs = [...pcs];
     }
-    back.push(bp);
-    prev = cur;
+    return segments;
+  };
+  const alternatives = paths.map(toSegments);
+  return { vocab: all, segments: alternatives[0], alternatives, downbeat: run.tp?.downbeat ?? null };
+}
+
+// Which beat of a detected beat grid starts the bar. Long notes, and above all the
+// last note of a phrase, tend to land on strong beats (the evidence Temperley's
+// meter model rests on), so each choice is scored by how much note length lands on
+// downbeats and half bars. Moving the bar line is a strong claim (a tune whose long
+// notes fall on beat 3 reads almost as well a half bar later), so the first guess,
+// the beat the singing starts on, stands unless another is clearly better: a
+// pickup into the first bar, typically.
+function findDownbeat(notes, tempo) {
+  const per = barBeats(tempo.meter);
+  let best = tempo.downbeat, bestScore = -Infinity, first = 0;
+  for (let s = 0; s < per; s++) {
+    const db = tempo.downbeat + s * tempo.beat;
+    let score = 0;
+    notes.forEach((n, i) => {
+      const pos = (n.start - db) / tempo.beat, k = Math.round(pos);
+      if (Math.abs(pos - k) > 0.2) return;
+      const idx = ((k % per) + per) % per;
+      const strength = idx === 0 ? 1 : per % 2 === 0 && idx === per / 2 ? 0.5 : per % 3 === 0 && idx % 3 === 0 ? 0.5 : 0.15;
+      const w = Math.min(4, (n.end - n.start) / tempo.beat) * (i === notes.length - 1 ? 2 : 1);
+      score += w * strength;
+    });
+    if (s === 0) first = score;
+    if (score > bestScore) { bestScore = score; best = db; }
+  }
+  return bestScore > first * 1.3 ? best : tempo.downbeat;
+}
+
+// Second-order Viterbi. A state is (the chord before, the current chord); holding a
+// chord keeps the state, changing moves it on, and a change that completes a
+// familiar three-chord move earns IDIOM_BONUS.
+function decode(E, wins, vocab, idioms) {
+  const N = vocab.length, T = wins.length, P = N + 1; // previous chord N = none yet
+  const S = P * N, TW = 0.4;
+  const isTonic = (c) => c.deg === 0 && c.func === 'T';
+  const ids = vocab.map(triadId);
+  const trans = vocab.map((a) => vocab.map((b) => TW * transition(a, b)));
+  const tri = (p, c, n) => (p < N && idioms?.has(`${ids[p]} ${ids[c]} ${ids[n]}`) ? TW * IDIOM_BONUS : 0);
+
+  let prev = new Float64Array(S).fill(-Infinity), cur = new Float64Array(S);
+  for (let c = 0; c < N; c++) prev[N * N + c] = E[0][c] + (isTonic(vocab[c]) ? 0.3 : 0);
+  const back = new Int32Array(T * S).fill(-1);
+  for (let t = 1; t < T; t++) {
+    cur.fill(-Infinity);
+    const empty = wins[t].total <= 1e-6 && !wins[t].played;
+    // Changes inside the bar need the notes to ask for them a little.
+    const hold = (empty ? 0.6 : 0) + (wins[t].level ? (wins[t].level === 1 ? HOLD.half : HOLD.beat) : 0);
+    for (let s = 0; s < S; s++) {
+      const v = prev[s];
+      if (v === -Infinity) continue;
+      const p = Math.floor(s / N), c = s % N;
+      const stay = v + trans[c][c] + hold + E[t][c];
+      if (stay > cur[s]) { cur[s] = stay; back[t * S + s] = s; }
+      for (let n = 0; n < N; n++) {
+        if (n === c) continue;
+        const to = c * N + n;
+        const w = v + trans[c][n] + tri(p, c, n) + E[t][n];
+        if (w > cur[to]) { cur[to] = w; back[t * S + to] = s; }
+      }
+    }
+    [prev, cur] = [cur, prev];
   }
 
-  let end = 0, bestEnd = -Infinity;
-  vocab.forEach((c, j) => {
-    const v = prev[j] + (isTonic(c) ? 0.35 : c.deg === 7 && c.func === 'D' ? 0.1 : 0);
-    if (v > bestEnd) { bestEnd = v; end = j; }
-  });
+  let end = 0, score = -Infinity;
+  for (let s = 0; s < S; s++) {
+    if (prev[s] === -Infinity) continue;
+    const c = vocab[s % N];
+    const v = prev[s] + (isTonic(c) ? 0.35 : c.deg === 7 && c.func === 'D' ? 0.1 : 0);
+    if (v > score) { score = v; end = s; }
+  }
   const path = new Array(T);
-  path[T - 1] = end;
-  for (let t = T - 1; t > 0; t--) path[t - 1] = back[t - 1][path[t]];
-
-  const segments = [];
-  path.forEach((j, t) => {
-    const last = segments[segments.length - 1];
-    if (last && last.chord === vocab[j]) {
-      last.end = wins[t].end;
-      last.wins.push(t);
-    } else {
-      segments.push({ chord: vocab[j], start: wins[t].start, end: wins[t].end, wins: [t] });
-    }
-  });
-
-  for (const seg of segments) {
-    const ranked = vocab
-      .map((c, j) => ({ chord: c, score: seg.wins.reduce((a, t) => a + E[t][j], 0) / seg.wins.length }))
-      .sort((a, b) => b.score - a.score);
-    const alts = ranked.slice(0, 6);
-    if (!alts.some((a) => a.chord === seg.chord)) alts[alts.length - 1] = ranked.find((a) => a.chord === seg.chord);
-    seg.alts = alts;
-    const pcs = new Set();
-    seg.wins.forEach((t) => wins[t].items.forEach((it) => pcs.add(it.pc)));
-    seg.pcs = [...pcs];
+  for (let t = T - 1, s = end; t >= 0; t--) {
+    path[t] = s % N;
+    s = back[t * S + s];
   }
+  return { path, score };
+}
 
-  return { vocab: all, segments };
+// A phrase sung again usually wants the same chords again. Where the melody
+// repeats (the same notes in the same rhythm, six or more of them, over a couple
+// of seconds), the windows that line up are given the same, pooled evidence.
+// Returns the groups of windows that line up, earliest first.
+function tieRepeats(E, wins, notes) {
+  const N = notes.length;
+  if (N < 12 || wins.length < 4) return [];
+  const ioi = (i) => (i + 1 < N ? notes[i + 1].start - notes[i].start : null);
+  const same = (i, j) => {
+    if (notes[i].pc !== notes[j].pc) return false;
+    const a = ioi(i), b = ioi(j);
+    return a == null || b == null || Math.abs(Math.log(a / b)) < 0.35;
+  };
+  const parent = wins.map((_, i) => i);
+  const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  const winAt = (t) => wins.findIndex((w) => t >= w.start && t < w.end);
+  let tied = false;
+  for (let i = 0; i < N; i++) {
+    for (let j = i + 1; j < N; j++) {
+      if (!same(i, j) || (i > 0 && same(i - 1, j - 1))) continue; // only from where a match begins
+      let L = 0;
+      while (j + L < N && i + L < j && same(i + L, j + L)) L++;
+      if (L < 6 || notes[j + L - 1].end - notes[j].start < 2) continue;
+      const shift = notes[j].start - notes[i].start, from = notes[j].start, to = notes[j + L - 1].end;
+      wins.forEach((w, b) => {
+        const mid = (w.start + w.end) / 2;
+        if (mid < from || mid > to) return;
+        const a = winAt(mid - shift);
+        const len = w.end - w.start;
+        if (a < 0 || a === b || Math.abs(wins[a].end - wins[a].start - len) > 0.3 * len) return;
+        parent[find(a)] = find(b);
+        tied = true;
+      });
+    }
+  }
+  if (!tied) return [];
+  const groups = new Map();
+  wins.forEach((_, i) => {
+    const r = find(i);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r).push(i);
+  });
+  for (const g of groups.values()) {
+    if (g.length < 2) continue;
+    const avg = E[g[0]].map((_, j) => g.reduce((a, t) => a + E[t][j], 0) / g.length);
+    for (const t of g) E[t] = avg.slice();
+  }
+  return [...groups.values()].filter((g) => g.length > 1).map((g) => g.sort((a, b) => a - b));
+}
+
+// Windows that line up across a repeat take the chord chosen the first time
+// through. The very last window stays free, so the end can still come home.
+function repeatChords(path, ties) {
+  if (!ties.length) return path;
+  const out = path.slice();
+  for (const g of ties) for (const t of g.slice(1)) if (t !== out.length - 1) out[t] = out[g[0]];
+  return out;
 }
 
 // Estimates a beat grid from note onsets: for each candidate tempo, measure how
@@ -493,4 +713,57 @@ export function voicing(chord) {
   const bass = 36 + chord.root;
   const upper = chord.tones.map((p) => 55 + ((p - 7 + 12) % 12)).sort((a, b) => a - b);
   return [bass, ...upper];
+}
+
+// Bass notes for a progression: the root, except where the chord's third makes a
+// stepwise line between the chords either side (C – G/B – Am), the commonest
+// reason for an inversion. Returns a pitch class per chord.
+export function bassLine(chords) {
+  const step = (a, b) => {
+    const d = ((b - a + 18) % 12) - 6;
+    return Math.abs(d) >= 1 && Math.abs(d) <= 2 ? Math.sign(d) : 0;
+  };
+  const out = [];
+  chords.forEach((c, i) => {
+    const p = out[i - 1], n = chords[i + 1]?.root;
+    let bass = c.root;
+    const third = c.quality === 'sus4' ? null : c.tones[1];
+    if (p != null && n != null && third != null && chords[i - 1] !== c && chords[i + 1] !== c) {
+      const a = step(p, third), b = step(third, n);
+      if (a && a === b && !(step(p, c.root) && step(c.root, n))) bass = third;
+    }
+    out.push(bass);
+  });
+  return out;
+}
+
+// Voicings for a whole progression: the bass (from bassLine) low, and the upper
+// notes moving as little as possible from one chord to the next, the way a
+// keyboard player would play them.
+export function voiceLead(chords, basses = chords.map((c) => c.root)) {
+  let prev = null, lastBass = null;
+  return chords.map((c, i) => {
+    // The bass takes the octave nearest the last bass note, within the low register.
+    let bass = 36 + basses[i];
+    if (lastBass != null) {
+      const options = [bass - 12, bass, bass + 12].filter((m) => m >= 31 && m <= 50);
+      bass = options.reduce((a, m) => (Math.abs(m - lastBass) < Math.abs(a - lastBass) ? m : a));
+    }
+    lastBass = bass;
+    const options = c.tones.map((_, r) => {
+      const order = [...c.tones.slice(r), ...c.tones.slice(0, r)];
+      const v = [];
+      for (const t of order) {
+        let m = 52 + ((t - 52 + 120) % 12);
+        while (v.length && m <= v[v.length - 1]) m += 12;
+        v.push(m);
+      }
+      return v;
+    });
+    const cost = (v) => prev
+      ? v.reduce((a, m) => a + Math.min(...prev.map((q) => Math.abs(q - m))), 0) + 0.3 * Math.abs(v[0] - prev[0])
+      : Math.abs(v.reduce((a, b) => a + b, 0) / v.length - 62);
+    prev = options.reduce((best, v) => (cost(v) < cost(best) ? v : best));
+    return [bass, ...prev];
+  });
 }

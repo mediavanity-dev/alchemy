@@ -24,26 +24,13 @@ Append `#demo` to the URL to load a built-in demo melody without a microphone.
 
 | File | Role |
 | --- | --- |
-| `js/pitch.js` | Downsamples to ~12 kHz, tracks pitch with the McLeod Pitch Method, detects the singer's tuning offset, and segments the pitch curve into notes (splitting repeated notes on loudness dips). |
-| `js/theory.js` | Ranks all 24 keys (Krumhansl–Kessler profiles plus first/last-note hints), slices the melody into chord windows scaled to the singer's note spacing, then runs a Viterbi search for chords that fit the notes *and* move like a real progression. |
-| `js/sound.js` | Classifies a recording as melody, chords or rhythm; chroma (pitch-class energy) for chord layers; hit detection with kick/snare/hi-hat labels for rhythm layers. |
+| `js/pitch.js` | Downsamples to ~12 kHz and tracks pitch with the McLeod Pitch Method, keeping octave alternatives. Follows the singer's tuning as it drifts (with vibrato averaged out), then finds the notes with an HMM/Viterbi note tracker in the spirit of pYIN, so vibrato, scoops and octave slips stay inside their note. Repeated notes split on loudness dips. |
+| `js/theory.js` | Ranks 48 keys (major, minor, Dorian, Mixolydian) by how likely the notes are under Temperley's melody profiles (and his harmony profiles for played chords), plus first/last-note hints. Places bar lines from where long notes fall, slices the melody into chord windows, and runs a second-order Viterbi search for chords that fit the notes, move like a real progression and favour familiar three-chord moves. Repeated phrases keep their chords. Offers several distinct progressions, and picks inversions and voice leading. |
+| `js/sound.js` | Classifies a recording as melody, chords or rhythm; tuning-corrected chroma (pitch-class energy) for chord layers; hit detection with kick/snare/hi-hat labels for rhythm layers. |
+| `js/track-worker.js` | Runs pitch tracking in a Web Worker so the page stays smooth. |
+| `js/midi.js` | Writes the melody, chords and bass as a standard MIDI file. |
 | `js/tune.js` | Optional pitch correction (TD-PSOLA) toward the nearest note or the key. |
 | `js/synth.js` | Web Audio pad, lead, clicks, drum kit and recorded-audio playback, mixed per track, with a small reverb. |
 | `js/db.js` | IndexedDB library (metadata and audio in separate stores). |
 | `js/app.js` | UI: capture, harmony view, tracks and layers, chord alternatives sheet, save/share, library. |
 | `sw.js` | Network-first service worker so the app opens offline. |
-
-## Measuring the analysis
-
-The Lab page ([`lab/`](https://mediavanity-dev.github.io/alchemy/lab/)) records labelled test takes: pick a type
-(sing a phrase back, strum given chords, beatbox, room noise…), record a few of each, then tap Export to get one zip
-of WAV files plus `labels.json`. Takes stay on the device until exported.
-
-Put the zips in `testdata/` (git-ignored) and score the app's analysis against them:
-
-```sh
-node tools/eval.mjs                      # kind, notes, key and chord accuracy per type
-node tools/eval.mjs -v                   # every take, with what was detected
-node tools/eval.mjs --save base.json     # keep a baseline...
-node tools/eval.mjs --compare base.json  # ...and see what a change did to it
-```
