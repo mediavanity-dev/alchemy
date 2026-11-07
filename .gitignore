@@ -1,2 +1,5 @@
 .DS_Store
 Thumbs.db
+
+# Lab recordings: private and large, never published
+testdata/

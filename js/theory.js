@@ -103,8 +103,8 @@ export function detectKeys(notes, played = []) {
   const hist = new Array(12).fill(0);
   for (const n of notes) hist[pc(n.midi)] += Math.min(n.end - n.start, 1.5);
   for (const src of played) for (const f of src.frames) for (let k = 0; k < 12; k++) hist[k] += f[k] * src.hop * 1.5;
-  const first = pc(notes[0].midi);
-  const last = pc(notes[notes.length - 1].midi);
+  const first = notes.length ? pc(notes[0].midi) : -1;
+  const last = notes.length ? pc(notes[notes.length - 1].midi) : -1;
 
   const keys = [];
   for (let t = 0; t < 12; t++) {
@@ -374,11 +374,12 @@ export function harmonize(notes, key, { rhythm: rate = 'bar', palette = 'triads'
   const scale = scalePcs(key);
   const ann = annotate(notes, tempo);
   // The harmony covers the melody and any stretch where an instrument plays on its own.
-  let t0 = notes[0].start, t1 = notes[notes.length - 1].end;
+  let t0 = notes.length ? notes[0].start : Infinity, t1 = notes.length ? notes[notes.length - 1].end : -Infinity;
   for (const src of played) {
     const on = src.frames.map((f, i) => (f.some((v) => v > 0) ? src.t0 + i * src.hop : null)).filter((t) => t != null);
     if (on.length) { t0 = Math.min(t0, on[0]); t1 = Math.max(t1, on[on.length - 1] + src.hop); }
   }
+  if (!(t1 > t0)) return { vocab: all, segments: [] };
   const wins = (tempo ? makeGridWindows(ann, rhythm, tempo, [t0, t1]) : makeWindows(ann, rhythm, [t0, t1], changePoints(played)))
     .map((w) => ({ ...w, played: playedOver(played, w.start, w.end) }));
   const E = wins.map((w) => vocab.map((c) => emission(c, w, scale)));

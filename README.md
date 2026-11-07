@@ -3,6 +3,8 @@
 Sing, hum or play a melody on any instrument; Alchemy finds the key it sits in and the chord progression underneath it. Add more parts on top (voices, instruments, beats) as layers.
 A mobile-first, installable web app (PWA) with no build step and no dependencies.
 
+**Try it live:** https://mediavanity-dev.github.io/alchemy/ ([demo melody](https://mediavanity-dev.github.io/alchemy/#demo))
+
 ## Run it
 
 The microphone only works on `https://` or `localhost`, and the app uses ES modules, so serve the folder:
@@ -30,3 +32,18 @@ Append `#demo` to the URL to load a built-in demo melody without a microphone.
 | `js/db.js` | IndexedDB library (metadata and audio in separate stores). |
 | `js/app.js` | UI: capture, harmony view, tracks and layers, chord alternatives sheet, save/share, library. |
 | `sw.js` | Network-first service worker so the app opens offline. |
+
+## Measuring the analysis
+
+The Lab page ([`lab/`](https://mediavanity-dev.github.io/alchemy/lab/)) records labelled test takes: pick a type
+(sing a phrase back, strum given chords, beatbox, room noise…), record a few of each, then tap Export to get one zip
+of WAV files plus `labels.json`. Takes stay on the device until exported.
+
+Put the zips in `testdata/` (git-ignored) and score the app's analysis against them:
+
+```sh
+node tools/eval.mjs                      # kind, notes, key and chord accuracy per type
+node tools/eval.mjs -v                   # every take, with what was detected
+node tools/eval.mjs --save base.json     # keep a baseline...
+node tools/eval.mjs --compare base.json  # ...and see what a change did to it
+```
