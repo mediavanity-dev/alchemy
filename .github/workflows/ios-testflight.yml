@@ -14,7 +14,8 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    # Intel Macs: GitHub's Apple-silicon Macs were too busy to start a job (Nov 2026).
+    runs-on: macos-26-intel
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
