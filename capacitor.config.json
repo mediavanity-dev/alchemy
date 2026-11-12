@@ -1,0 +1,11 @@
+{
+  "appId": "com.mediavanity.alchemy",
+  "appName": "Alchemy",
+  "webDir": "www",
+  "backgroundColor": "#120f1a",
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#120f1a",
+    "allowsLinkPreview": false
+  }
+}

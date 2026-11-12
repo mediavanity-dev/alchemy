@@ -6,6 +6,7 @@ import { Synth } from './synth.js';
 import { tuneClip, targetFn } from './tune.js';
 import { analyze, classify, chromaOf, hitsOf, normalizePeak } from './sound.js';
 import * as store from './db.js';
+import { isNative, shareText, shareFile } from './native.js';
 
 const $ = (sel) => document.querySelector(sel);
 const MAX_SECONDS = 45;
@@ -2653,7 +2654,7 @@ async function saveTake(name) {
     toast('Saved to your library');
     haptic(12);
   } catch {
-    toast("Couldn't save. Your browser may be out of storage.");
+    toast(isNative ? "Couldn't save. Your iPhone may be out of storage." : "Couldn't save. Your browser may be out of storage.");
   }
 }
 
@@ -2678,6 +2679,10 @@ async function shareChart() {
     '',
     `Melody: ${state.take.notes.map((n) => spell(pc(n.midi), key)).join(' ')}`,
   ].join('\n');
+  if (isNative) {
+    try { await shareText('Alchemy', text); } catch { toast("Couldn't share the chord chart."); }
+    return;
+  }
   if (navigator.share) {
     try { await navigator.share({ title: 'Alchemy', text }); } catch { /* cancelled */ }
     return;
@@ -2720,6 +2725,10 @@ async function shareMidi() {
     ],
   });
   const name = `${(take.name || 'Alchemy').replace(/[\\/:*?"<>|]+/g, '').trim() || 'Alchemy'}.mid`;
+  if (isNative) {
+    try { await shareFile(name, blob); } catch { toast("Couldn't share the MIDI file."); }
+    return;
+  }
   const file = new File([blob], name, { type: 'audio/midi' });
   if (navigator.canShare?.({ files: [file] })) {
     try { await navigator.share({ files: [file], title: name }); return; } catch (err) { if (err.name === 'AbortError') return; }
@@ -2826,7 +2835,8 @@ if (location.hash === '#demo') $('#demoBtn').click();
 // Updates: check whenever the app comes back to the foreground (a home-screen app
 // can stay open for days), and switch to a new version as soon as that can't lose
 // anything: not mid-recording, and no unsaved take in hand.
-if ('serviceWorker' in navigator && (location.protocol === 'https:' || ['localhost', '127.0.0.1'].includes(location.hostname))) {
+// The iOS app ships its files inside the app and updates through the App Store.
+if (!isNative && 'serviceWorker' in navigator && (location.protocol === 'https:' || ['localhost', '127.0.0.1'].includes(location.hostname))) {
   const hadController = !!navigator.serviceWorker.controller;
   let updateReady = false;
   const safeToReload = () => !rec && !layerRec && !starting && (!state.take || (state.take.id && !state.take.dirty));

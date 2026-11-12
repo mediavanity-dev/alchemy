@@ -1,5 +1,5 @@
 // Network-first service worker: always fresh when online, still opens offline.
-const CACHE = 'alchemy-v22';
+const CACHE = 'alchemy-v23';
 const SHELL = [
   './',
   'index.html',
@@ -9,7 +9,7 @@ const SHELL = [
   'js/theory.js',
   'js/synth.js',
   'js/tune.js', 'js/sound.js', 'js/midi.js', 'js/timing.js',
-  'js/db.js',
+  'js/db.js', 'js/native.js',
   'js/recorder-worklet.js',
   'js/track-worker.js',
   'manifest.webmanifest',

@@ -1,0 +1,22 @@
+{
+  "name": "alchemy",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Hum a melody and discover the harmony it could live in.",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-www.mjs",
+    "ios:sync": "npm run build && npx cap sync ios",
+    "ios:icons": "node scripts/make-icons.mjs"
+  },
+  "dependencies": {
+    "@capacitor/core": "^8.6.0",
+    "@capacitor/filesystem": "^8.1.5",
+    "@capacitor/ios": "^8.6.0",
+    "@capacitor/share": "^8.0.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.6.0",
+    "sharp": "^0.35.5"
+  }
+}

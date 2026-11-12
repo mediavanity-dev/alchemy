@@ -35,3 +35,8 @@ Append `#demo` to the URL to load a built-in demo melody without a microphone.
 | `js/db.js` | IndexedDB library (metadata and audio in separate stores). |
 | `js/app.js` | UI: capture, harmony view, tracks and layers, chord alternatives sheet, save/share, library. |
 | `sw.js` | Network-first service worker so the app opens offline. |
+
+## iPhone app
+
+The same code ships as an iOS app via Capacitor (`ios/`). Run `npm install`, then `npm run ios:sync` after web changes.
+See [APP_STORE.md](APP_STORE.md) for building on GitHub Actions and publishing to the App Store.
