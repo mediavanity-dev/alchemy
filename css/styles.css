@@ -390,6 +390,9 @@ main { flex: 1; position: relative; overflow: hidden; }
 .label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 .seg { display: flex; padding: 3px; border-radius: 12px; background: var(--surface); border: 1px solid var(--line); }
 .seg button { flex: 1; min-height: 36px; padding: 0 4px; border-radius: 9px; font-size: 13px; color: var(--muted); white-space: nowrap; transition: background 0.15s, color 0.15s; }
+.no-choice { display: flex; align-items: center; min-height: 44px; margin: 0; padding: 0 14px; border-radius: 12px; border: 1px dashed var(--line); color: var(--faint); font-size: 13px; }
+.no-choice[hidden] { display: none; }
+.seg button[hidden] { display: none; }
 .seg button.active { background: var(--surface-2); color: var(--text); font-weight: 600; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2); }
 
 .section-head { display: flex; justify-content: space-between; align-items: baseline; margin: 22px 0 10px; }

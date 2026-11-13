@@ -862,10 +862,40 @@ function reharmonize() {
   state.overrides = {};
   state.ideaIdx = 0;
   state.harmony = harmonize(analysisNotes(), state.keys[state.keyIdx], harmonyOptions());
+  state.noChoice = settingsWithoutChoice();
   // A detected beat grid takes the bar lines the harmony settled on (a pickup moves them).
   const t = state.take.tempo;
   if (t && state.harmony.downbeat != null && t.source !== 'countin' && !t.manual) t.downbeat = state.harmony.downbeat;
   markDirty();
+}
+
+// "Chord every" and "Chords" only offer options that would change the progression.
+// A short, simple tune, say, gets the same one chord at every rate but the beat.
+// Options giving the same chords as one already offered are hidden (the current
+// one always stays). Returns { rhythm, palette }: the set of hidden values for each.
+const SETTING_VALUES = { rhythm: ['2bar', 'bar', 'half', 'beat'], palette: ['triads', 'extended', 'chromatic'] };
+// The chords and where each one changes. A chord repeated across bars counts once,
+// so "Am for two bars" and "Am, Am" are the same progression.
+const progressionSig = (h) => h.segments
+  .filter((s, i, all) => i === 0 || all[i - 1].chord.id !== s.chord.id)
+  .map((s) => `${s.start.toFixed(2)}:${s.chord.id}`).join('|');
+
+function settingsWithoutChoice() {
+  const notes = analysisNotes(), key = state.keys[state.keyIdx], base = harmonyOptions();
+  const out = {};
+  for (const [setting, values] of Object.entries(SETTING_VALUES)) {
+    const sigs = new Map(values.map((v) => [v, v === state[setting]
+      ? progressionSig(state.harmony)
+      : progressionSig(harmonize(notes, key, { ...base, [setting]: v, ideas: 1 }))]));
+    const offered = new Set([sigs.get(state[setting])]);
+    out[setting] = new Set();
+    for (const v of values) {
+      if (v === state[setting]) continue;
+      if (offered.has(sigs.get(v))) out[setting].add(v);
+      else offered.add(sigs.get(v));
+    }
+  }
+  return out;
 }
 
 // Shows the next of the suggested progressions.
@@ -998,7 +1028,16 @@ function renderHarmony() {
 
   document.querySelectorAll('.seg[data-setting]').forEach((seg) => {
     const val = state[seg.dataset.setting];
-    seg.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.value === val));
+    const hidden = state.noChoice?.[seg.dataset.setting] ?? new Set();
+    seg.querySelectorAll('button').forEach((b) => {
+      b.classList.toggle('active', b.dataset.value === val);
+      b.hidden = hidden.has(b.dataset.value);
+    });
+    // Nothing to choose between: a short note instead of options that all sound the same
+    const none = hidden.size === SETTING_VALUES[seg.dataset.setting].length - 1;
+    seg.style.display = none ? 'none' : '';
+    const msg = seg.parentElement.querySelector('.no-choice');
+    if (msg) msg.hidden = !none;
   });
 
   $('#chordList').innerHTML = segs
@@ -1629,14 +1668,17 @@ function startPlayback({ countIn = false } = {}) {
     // A loop over a trusted beat grid is rounded out to whole bars, so the groove
     // carries straight on across the seam.
     // With a beat grid to follow (a count-in recording, or the metronome on),
-    // playback starts on the bar line before the first note, so the click's "one"
-    // is heard even when the singer came in a little after it.
+    // playback starts on the beat before the first note, so that beat's click is
+    // heard (the "one", when the singer came in a little after it). Only a beat,
+    // never a whole bar: the playhead waits at the first note until then.
     const grid = trustedTempo();
-    const barGrid = grid ?? (state.metronome ? take.tempo : null);
-    if (barGrid) {
-      const bar = barBeats(barGrid.meter) * barGrid.beat;
-      start = barGrid.downbeat + Math.floor((start - barGrid.downbeat) / bar + 0.02) * bar;
-      if (state.loop && (!layerRec || layerRec.loop) && grid) end = start + Math.max(1, Math.ceil((end - start) / bar - 0.05)) * bar;
+    const beatGrid = grid ?? (state.metronome ? take.tempo : null);
+    if (state.loop && (!layerRec || layerRec.loop) && grid) {
+      const bar = barBeats(grid.meter) * grid.beat;
+      start = grid.downbeat + Math.floor((start - grid.downbeat) / bar + 0.02) * bar;
+      end = start + Math.max(1, Math.ceil((end - start) / bar - 0.05)) * bar;
+    } else if (beatGrid) {
+      start = beatGrid.downbeat + Math.floor((start - beatGrid.downbeat) / beatGrid.beat + 0.02) * beatGrid.beat;
     }
     // Every track gets its own gain stage, muted ones at zero, so the mix can change
     // while it plays.
@@ -1970,7 +2012,7 @@ function chromaBlocks(l) {
   return l.blocks;
 }
 
-const defaultMix = () => ({ take: { on: true, vol: 1 }, backing: { on: true, vol: 0.45 }, guide: { on: false, vol: 0.7 }, click: { vol: 0.8 } });
+const defaultMix = () => ({ take: { on: true, vol: 1 }, backing: { on: true, vol: 0.45 }, guide: { on: false, vol: 0.7 }, click: { vol: 0.4 } });
 
 // A track of the mix: 'take', 'backing', 'guide', 'click' or a layer id.
 // A quiet take can only be lifted so far before the room's hiss gets loud, so it
