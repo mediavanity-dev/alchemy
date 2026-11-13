@@ -8,7 +8,7 @@ let plugins = null;
 async function native() {
   if (!plugins) {
     const { registerPlugin } = await import('./vendor/capacitor-core.js');
-    plugins = { Share: registerPlugin('Share'), Filesystem: registerPlugin('Filesystem'), App: registerPlugin('App'), AudioRoute: registerPlugin('AudioRoute') };
+    plugins = { Share: registerPlugin('Share'), Filesystem: registerPlugin('Filesystem'), Alchemy: registerPlugin('Alchemy') };
   }
   return plugins;
 }
@@ -18,8 +18,8 @@ async function native() {
 export async function headphonesIn() {
   if (!isNative) return false;
   try {
-    const { AudioRoute } = await native();
-    return !!(await AudioRoute.current()).headphones;
+    const { Alchemy } = await native();
+    return !!(await Alchemy.headphones()).headphones;
   } catch {
     return false;
   }
@@ -34,22 +34,26 @@ export async function shareText(title, text) {
 }
 
 // Audio sent to Alchemy from another app: Voice Memos (Share → Alchemy), Files,
-// Mail and so on. iOS copies the file into the app and opens Alchemy with its
-// file:// URL, either launching it or while it's running. Calls
-// onFile(arrayBuffer, name) for each one, or onError() if it can't be read.
-export async function onOpenedFile(onFile, onError) {
-  const { App } = await native();
-  const handle = async (url) => {
-    if (!url?.startsWith('file:')) return;
-    const res = await fetch(window.Capacitor.convertFileSrc(url));
-    if (!res.ok) throw new Error(`Couldn't read ${url}`);
-    const name = decodeURIComponent(url.split('/').pop() || 'Imported audio');
-    onFile(await res.arrayBuffer(), name);
-  };
+// Mail and so on, whether it launched the app or arrived while it was running.
+// The native side copies each file in and hands over its first maxSeconds as WAV.
+// Calls onFile(arrayBuffer, name, truncated) for each, or onError() if one can't
+// be read.
+export async function onOpenedFile(onFile, onError, maxSeconds = 90) {
+  const { Alchemy } = await native();
   const report = (err) => { console.error('Opening a shared file failed', err); onError?.(); };
-  App.addListener('appUrlOpen', ({ url }) => handle(url).catch(report));
-  const launch = await App.getLaunchUrl();
-  if (launch?.url) handle(launch.url).catch(report);
+  let busy = Promise.resolve();
+  const take = () => (busy = busy.then(async () => {
+    const { files } = await Alchemy.takeOpenedFiles({ maxSeconds });
+    for (const f of files ?? []) {
+      if (f.error || !f.wav) { report(new Error(`${f.name}: ${f.error}`)); continue; }
+      const bin = atob(f.wav);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      await onFile(bytes.buffer, f.name || 'Imported audio', !!f.truncated);
+    }
+  }).catch(report));
+  await Alchemy.addListener('fileOpened', take);
+  await take();
 }
 
 // Writes a file to the app's cache and opens the iOS share sheet for it

@@ -455,7 +455,7 @@ const triadId = (c) => `${c.deg}${{ min: 'm', m7: 'm', madd9: 'm', dim: 'd', m7b
 // `played`: chroma from instrument layers whose chords should guide the choice.
 // Returns the best progression, plus up to `ideas` - 1 different ones in
 // `alternatives` (the best one first).
-export function harmonize(notes, key, { rhythm: rate = 'bar', palette = 'triads', tempo = null, played = [], ideas = 4 } = {}) {
+export function harmonize(notes, key, { rhythm: rate = 'bar', palette = 'triads', tempo = null, played = [], ideas = 4, span = null } = {}) {
   const rhythm = rateOf(rate);
   const all = buildVocab(key);
   const vocab = choicesFor(all, palette);
@@ -466,7 +466,10 @@ export function harmonize(notes, key, { rhythm: rate = 'bar', palette = 'triads'
     const on = src.frames.map((f, i) => (f.some((v) => v > 0) ? src.t0 + i * src.hop : null)).filter((t) => t != null);
     if (on.length) { t0 = Math.min(t0, on[0]); t1 = Math.max(t1, on[on.length - 1] + src.hop); }
   }
+  // A beat with no tune yet (beatbox): progressions in the key across its length.
+  if (span) { t0 = Math.min(t0, span[0]); t1 = Math.max(t1, span[1]); }
   if (!(t1 > t0)) return { vocab: all, segments: [], alternatives: [], downbeat: null };
+  if (!notes.length && !played.length) return loopHarmony(all, vocab, key, rhythm, tempo, [t0, t1]);
   const changes = changePoints(played);
   const idioms = IDIOM_SETS[key.mode];
 
@@ -524,6 +527,62 @@ export function harmonize(notes, key, { rhythm: rate = 'bar', palette = 'triads'
   };
   const alternatives = paths.map(toSegments);
   return { vocab: all, segments: alternatives[0], alternatives, downbeat: run.tp?.downbeat ?? null };
+}
+
+// Four-chord loops for a beat with no tune to follow: [scale degree, triad, richer chord].
+const LOOPS = {
+  major: [
+    [[0, 'maj', 'maj7'], [7, 'maj', 'dom7'], [9, 'min', 'm7'], [5, 'maj', 'maj7']], // I V vi IV
+    [[9, 'min', 'm7'], [5, 'maj', 'maj7'], [0, 'maj', 'maj7'], [7, 'maj', 'dom7']], // vi IV I V
+    [[0, 'maj', 'maj7'], [9, 'min', 'm7'], [5, 'maj', 'maj7'], [7, 'maj', 'dom7']], // I vi IV V
+    [[0, 'maj', 'maj7'], [5, 'maj', 'maj7'], [9, 'min', 'm7'], [7, 'maj', 'dom7']], // I IV vi V
+  ],
+  minor: [
+    [[0, 'min', 'm7'], [8, 'maj', 'maj7'], [3, 'maj', 'maj7'], [10, 'maj', 'maj']], // i VI III VII
+    [[0, 'min', 'm7'], [10, 'maj', 'maj'], [8, 'maj', 'maj7'], [10, 'maj', 'maj']], // i VII VI VII
+    [[0, 'min', 'm7'], [5, 'min', 'm7'], [0, 'min', 'm7'], [7, 'maj', 'dom7']], // i iv i V
+    [[0, 'min', 'm7'], [5, 'min', 'm7'], [10, 'maj', 'maj'], [3, 'maj', 'maj7']], // i iv VII III
+  ],
+  dorian: [
+    [[0, 'min', 'm7'], [5, 'maj', 'dom7'], [0, 'min', 'm7'], [5, 'maj', 'dom7']], // i IV i IV
+    [[0, 'min', 'm7'], [10, 'maj', 'maj'], [5, 'maj', 'dom7'], [0, 'min', 'm7']], // i VII IV i
+    [[0, 'min', 'm7'], [3, 'maj', 'maj7'], [5, 'maj', 'dom7'], [0, 'min', 'm7']], // i III IV i
+    [[0, 'min', 'm7'], [2, 'min', 'm7'], [5, 'maj', 'dom7'], [0, 'min', 'm7']], // i ii IV i
+  ],
+  mixolydian: [
+    [[0, 'maj', 'dom7'], [10, 'maj', 'maj'], [5, 'maj', 'maj7'], [0, 'maj', 'dom7']], // I VII IV I
+    [[0, 'maj', 'dom7'], [10, 'maj', 'maj'], [0, 'maj', 'dom7'], [10, 'maj', 'maj']], // I VII I VII
+    [[0, 'maj', 'dom7'], [7, 'min', 'm7'], [5, 'maj', 'maj7'], [0, 'maj', 'dom7']], // I v IV I
+    [[0, 'maj', 'dom7'], [5, 'maj', 'maj7'], [10, 'maj', 'maj'], [5, 'maj', 'maj7']], // I IV VII IV
+  ],
+};
+
+// Chords for a beat on its own (beatbox, say): familiar loops in the key, one chord
+// per window of the chosen rate. Each loop is one of the progressions on offer.
+function loopHarmony(all, vocab, key, rhythm, tempo, [t0, t1]) {
+  const rich = vocab.some((c) => c.color != null);
+  const find = (deg, q) => vocab.find((c) => c.deg === deg && c.quality === q && !c.chromatic)
+    ?? all.find((c) => c.deg === deg && c.quality === q && !c.chromatic);
+  const minorish = ['minor', 'dorian', 'phrygian', 'aeolian'].includes(key.mode) || vocab.find((c) => c.deg === 0)?.quality === 'min';
+  // Without a beat grid: even windows of about two seconds.
+  const n = Math.max(1, Math.round((t1 - t0) / 2));
+  const wins = tempo
+    ? makeGridWindows([], rhythm, tempo, [t0, t1])
+    : Array.from({ length: n }, (_, i) => ({ start: t0 + ((t1 - t0) * i) / n, end: t0 + ((t1 - t0) * (i + 1)) / n }));
+  const byPrior = [...vocab].sort((a, b) => b.prior - a.prior);
+  const alternatives = [];
+  for (const loop of LOOPS[key.mode] ?? LOOPS[minorish ? 'minor' : 'major']) {
+    const chords = loop.map(([deg, tri, ext]) => (rich && find(deg, ext)) || find(deg, tri));
+    if (chords.some((c) => !c)) continue;
+    const segments = wins.map((w, i) => {
+      const chord = chords[i % chords.length];
+      const alts = byPrior.filter((c) => c !== chord).slice(0, 5).map((c) => ({ chord: c, score: 0 }));
+      return { chord, start: w.start, end: w.end, wins: [i], alts: [{ chord, score: 0 }, ...alts], pcs: [] };
+    });
+    alternatives.push(segments);
+  }
+  if (!alternatives.length) return { vocab: all, segments: [], alternatives: [], downbeat: null };
+  return { vocab: all, segments: alternatives[0], alternatives, downbeat: tempo?.downbeat ?? null };
 }
 
 // Which beat of a detected beat grid starts the bar. Long notes, and above all the

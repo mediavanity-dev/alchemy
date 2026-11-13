@@ -701,13 +701,14 @@ async function importAudio(data, fileName) {
 // In the iPhone app, audio shared to Alchemy (Voice Memos → Share → Alchemy) opens
 // the same way as Import audio.
 if (isNative) {
-  onOpenedFile(async (data, name) => {
+  onOpenedFile(async (data, name, truncated) => {
     if (rec || layerRec || starting) { toast('Finish recording first, then share the file again.'); return; }
     stopPlayback();
     closeSheet();
     showView('capture');
     await importAudio(data, name);
-  }, () => toast("Couldn't open that file.")).catch(() => {});
+    if (truncated) toast(`Using the first ${MAX_IMPORT_SECONDS} seconds.`);
+  }, () => toast("Couldn't open that recording. Try Save to Files in Voice Memos, then Import audio."), MAX_IMPORT_SECONDS).catch(() => {});
 }
 
 // A short sung-style phrase in A minor, rendered with vibrato and a slightly flat tuning.
@@ -782,10 +783,10 @@ async function processAudio(samples, sampleRate, name, tempo = null) {
   normalizeLoudness(samples, sampleRate);
 
   const track = await trackOf(samples, sampleRate, (p) => setProcessing(true, 0.05 + p * 0.85));
-  const { notes, offset, trace, traceT0, hop } = segmentNotes(track);
-  // The main take is always treated as the tune everything is built on: whatever
-  // notes it has are harmonized, however rhythmic or chordal it sounded.
-  const { features } = classify(raw, sampleRate, track);
+  let { notes, offset, trace, traceT0, hop } = segmentNotes(track);
+  // Whatever notes the take has are harmonized as its tune, however rhythmic or
+  // chordal it sounded (the classifier leans towards melody).
+  const { kind, features } = classify(raw, sampleRate, track);
   // Plucked and struck sounds (short, decaying notes) are levelled by their peaks,
   // so their attacks aren't rounded off the way loudness levelling (made for
   // singing) would.
@@ -794,9 +795,18 @@ async function processAudio(samples, sampleRate, name, tempo = null) {
   await new Promise((r) => setTimeout(r, 250));
   setProcessing(false);
 
-  if (notes.length < 3) {
-    toast("I couldn't hear a clear tune. Try singing or playing a little louder, one note at a time.", 5000);
-    return;
+  // Too few notes for a tune but a clear beat (beatbox, tapping): it loads as a
+  // beat, with its tempo and chords in a key across it. A tune can go on top as a
+  // layer and lead the chords from there.
+  // Stray "notes" in a beat (a kick's thump) aren't a tune to follow.
+  let hits = null;
+  if (notes.length < 3 || kind === 'rhythm') {
+    hits = hitsOf(raw, sampleRate);
+    if (hits.length >= 4) notes = [];
+    else if (notes.length < 3) {
+      toast("I couldn't hear that clearly. Try singing or playing a little louder.", 5000);
+      return;
+    } else hits = null;
   }
 
   const duration = samples.length / sampleRate;
@@ -813,6 +823,7 @@ async function processAudio(samples, sampleRate, name, tempo = null) {
     trim: { start: 0, end: duration },
     layers: [],
     tempo,
+    hits,
   });
   haptic([8, 40, 8]);
   showView('harmony');
@@ -825,11 +836,11 @@ function loadTake(take, saved = {}) {
   take.layers ??= [];
   take.trim ??= { start: 0, end: take.duration };
   take.tune ??= { amount: 0, mode: 'chromatic' };
-  take.tempo ??= detectTempo(take.notes);
+  take.tempo ??= detectTempo(withHits(take.notes, take.hits));
   take.mix = { ...defaultMix(), ...take.mix };
   take.layers.forEach(prepareLayer);
   state.take = take;
-  state.keys = detectKeys(analysisNotes(), playedSources());
+  state.keys = findKeys();
   // The saved key itself, not its place in the ranking (which can change as the
   // analysis improves); older saves only have the key's name.
   const savedKey = state.keys.findIndex((k) => saved.key
@@ -882,8 +893,33 @@ function markDirty() {
 // tempo, one set by hand, or failing those the detected one, which the user can
 // correct from the tempo button.
 function harmonyOptions() {
-  return { rhythm: state.rhythm, palette: state.palette, tempo: state.take?.tempo ?? null, played: playedSources() };
+  return { rhythm: state.rhythm, palette: state.palette, tempo: state.take?.tempo ?? null, played: playedSources(), span: beatSpan() };
 }
+
+// The likely keys. A beat on its own has no notes to go by, so it's offered the
+// common keys, a minor one first, and it plays a familiar loop in whichever is picked.
+const BEAT_KEYS = ['A minor', 'C major', 'E minor', 'G major', 'D minor', 'F major'];
+function findKeys() {
+  const notes = analysisNotes(), played = playedSources();
+  const keys = detectKeys(notes, played);
+  if (notes.length || played.length) return keys;
+  const common = BEAT_KEYS.map((name) => keys.find((k) => keyName(k) === name)).filter(Boolean);
+  return [...common, ...keys.filter((k) => !common.includes(k))];
+}
+
+// A beat-only take (no tune of its own): where its hits start and end within the trim.
+function beatSpan() {
+  const take = state.take;
+  if (!take?.hits?.length || take.notes.length >= 3) return null;
+  const { start, end } = take.trim;
+  const ts = take.hits.map((h) => h.t).filter((t) => t >= start - 0.05 && t <= end);
+  return ts.length >= 2 ? [ts[0], Math.min(end, ts[ts.length - 1] + 0.3)] : null;
+}
+
+// Notes plus a beat's hits as short events, for finding the tempo.
+const withHits = (notes, hits) => (hits?.length
+  ? [...notes, ...hits.map((h) => ({ start: h.t, end: h.t + 0.1 }))].sort((a, b) => a.start - b.start)
+  : notes);
 
 // A beat grid the user has confirmed: their count-in, or a tempo they set.
 function trustedTempo() {
@@ -963,7 +999,7 @@ function regrid() {
 function reanalyze() {
   stopPlayback();
   retempo();
-  state.keys = detectKeys(analysisNotes(), playedSources());
+  state.keys = findKeys();
   state.keyIdx = 0;
   reharmonize();
   renderHarmony();
@@ -980,7 +1016,7 @@ function retempo() {
   const hits = take.layers
     .filter((l) => kindOf(l) === 'rhythm')
     .flatMap((l) => l.hits.map((h) => ({ start: l.offset + h.t, end: l.offset + h.t + 0.1 })));
-  take.tempo = detectTempo([...take.notes, ...hits].sort((a, b) => a.start - b.start), manual);
+  take.tempo = detectTempo(withHits([...take.notes, ...hits].sort((a, b) => a.start - b.start), take.hits), manual);
   if (take.tempo && manual) take.tempo.manual = true;
   if (take.tempo && meter) take.tempo.meter = meter;
 }
@@ -1008,7 +1044,10 @@ function takeRange() {
   let end = Math.min(trim.end, lastBase + 0.3);
   for (const x of n) end = Math.max(end, x.end + 0.3);
   for (const l of layers) end = Math.max(end, l.offset + l.duration);
-  return { start: Math.max(trim.start, n[0].start - 0.15), end };
+  const beat = beatSpan();
+  if (beat) end = Math.max(end, beat[1]);
+  const first = Math.min(n[0]?.start ?? Infinity, beat?.[0] ?? Infinity);
+  return { start: Number.isFinite(first) ? Math.max(trim.start, first - 0.15) : trim.start, end };
 }
 
 /* ---------- harmony view ---------- */
@@ -1039,7 +1078,7 @@ function renderHarmony() {
   const { start, end } = takeRange();
   const included = take.layers.filter((l) => l.included).length;
   $('#keyMeta').textContent =
-    `${Math.round(key.p * 100)}% likely · ${take.notes.length} notes · ${fmtTime(end - start)}` +
+    (beatSpan() ? `Beat${take.tempo ? ` · ${Math.round(take.tempo.bpm)} bpm` : ''} · ${fmtTime(end - start)}` : `${Math.round(key.p * 100)}% likely · ${take.notes.length} notes · ${fmtTime(end - start)}`) +
     (included ? ` · +${included} layer${included > 1 ? 's' : ''}` : '');
 
   const trimmed = take.trim.start > 0.05 || take.trim.end < take.duration - 0.05;
@@ -1065,9 +1104,10 @@ function renderHarmony() {
   }
   $('#layerCount').textContent = take.layers.length || '';
 
+  const guessed = !analysisNotes().length && !playedSources().length;
   $('#keyChips').innerHTML = state.keys
     .slice(0, 6)
-    .map((k, i) => `<button class="chip ${i === state.keyIdx ? 'active' : ''}" data-i="${i}" role="option" aria-selected="${i === state.keyIdx}">${keyName(k)}<small>${Math.max(1, Math.round(k.p * 100))}%</small></button>`)
+    .map((k, i) => `<button class="chip ${i === state.keyIdx ? 'active' : ''}" data-i="${i}" role="option" aria-selected="${i === state.keyIdx}">${keyName(k)}${guessed ? '' : `<small>${Math.max(1, Math.round(k.p * 100))}%</small>`}</button>`)
     .join('');
 
   document.querySelectorAll('.seg[data-setting]').forEach((seg) => {
@@ -1207,9 +1247,10 @@ function drawRoll(playT = null) {
   }
   g.globalAlpha = 1;
 
-  // Rhythm layers: a tick per hit along the bottom, tallest for kicks
-  for (const l of take.layers) {
-    if (kindOf(l) !== 'rhythm' || !l.hits) continue;
+  // Rhythm layers (and a beat-only take): a tick per hit along the bottom, tallest for kicks
+  const hitGroups = take.layers.filter((l) => kindOf(l) === 'rhythm' && l.hits);
+  if (beatSpan()) hitGroups.unshift({ hits: take.hits, offset: 0, muted: !take.mix.take.on, base: true });
+  for (const l of hitGroups) {
     g.fillStyle = l.muted ? cFaint : cViolet;
     for (const hit of l.hits) {
       const tx = x(l.offset + hit.t);
@@ -1406,11 +1447,12 @@ $('#trimApply').addEventListener('click', async () => {
   }
   const frames = take.track.frames.filter((f) => f.t >= start && f.t <= end);
   const r = segmentNotes({ frames, hop: take.track.hop });
-  if (r.notes.length < 3) {
+  if (r.notes.length < 3 && !take.hits?.length) {
     toast('Not enough melody in that selection. Try a wider trim.');
     return;
   }
-  take.notes = r.notes;
+  // A beat keeps no notes of its own (see processAudio).
+  take.notes = take.hits?.length ? [] : r.notes;
   take.offset = r.offset;
   take.trim = { start, end };
   state.trimming = null;
@@ -2026,7 +2068,11 @@ async function stopLayer() {
   take.layers.push(layer);
   if (kind === 'rhythm' && take.tempo?.source !== 'countin' && !take.tempo?.manual) { retempo(); regrid(); }
   markDirty();
-  renderHarmony();
+  // Over a beat-only take, the first tune sung on top leads the chords straight away.
+  if (beatSpan() && kind === 'melody' && layer.notes.length >= 3 && !take.layers.some((l) => l.included)) {
+    layer.included = true;
+    reanalyze();
+  } else renderHarmony();
   toast(passes.length > 1
     ? `${r.name}: ${passes.length} passes recorded, keeping the last one. Pick another in Tracks.`
     : `${r.name} added`, passes.length > 1 ? 4600 : 1800);
@@ -2433,7 +2479,7 @@ const timingHome = (l) => (l.passes ? l.passes[l.pass ?? 0] : l);
 // grid (the audio was just fitted to it), keeping the key the user had chosen.
 function refitAfterTiming() {
   const was = state.keys[state.keyIdx];
-  state.keys = detectKeys(analysisNotes(), playedSources());
+  state.keys = findKeys();
   const i = state.keys.findIndex((k) => k.tonic === was.tonic && k.mode === was.mode);
   state.keyIdx = Math.max(0, i);
   reharmonize();
@@ -2470,7 +2516,7 @@ async function applyTiming({ grid, amount, layers }) {
   restoreTiming();
   // The audio now follows this grid, so it stays put from here on.
   if (tempo.source !== 'countin') tempo.manual = true;
-  const clips = [{ obj: take, offset: 0, notes: take.notes, kind: 'melody' }];
+  const clips = [{ obj: take, offset: 0, notes: take.notes, kind: take.hits?.length ? 'rhythm' : 'melody' }];
   if (layers) {
     for (const l of take.layers) {
       clips.push({ obj: l, offset: l.offset, kind: kindOf(l), notes: l.notes.map((n) => ({ ...n, start: n.start - l.offset, end: n.end - l.offset })) });
@@ -2851,6 +2897,7 @@ async function saveTake(name) {
     traceT0: take.traceT0,
     hop: take.hop,
     trim: take.trim,
+    hits: take.hits,
     tempo: take.tempo,
     tune: take.tune,
     timing: take.timing,
