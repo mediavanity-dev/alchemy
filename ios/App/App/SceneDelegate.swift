@@ -34,6 +34,10 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 class AppViewController: CAPBridgeViewController {
     override func capacitorDidLoad() {
         bridge?.registerPluginInstance(AlchemyPlugin())
+        // An app's screens don't pinch-zoom (the page's viewport says so too).
+        webView?.scrollView.minimumZoomScale = 1
+        webView?.scrollView.maximumZoomScale = 1
+        webView?.scrollView.bouncesZoom = false
     }
 }
 

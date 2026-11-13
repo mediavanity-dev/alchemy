@@ -50,6 +50,8 @@
 html, body { height: 100%; }
 body {
   background: var(--bg);
+  /* No double-tap zoom: taps on buttons register straight away */
+  touch-action: manipulation;
   color: var(--text);
   font-family: var(--font);
   font-size: 16px;

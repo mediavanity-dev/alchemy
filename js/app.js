@@ -2573,7 +2573,8 @@ function openTracksSheet() {
     body.querySelector('.record-row').outerHTML = '<button class="layer-more" id="layerMore">More layers come with <b>Alchemy Pro</b></button>';
     $('#layerMore').addEventListener('click', () => openProSheet('layers'));
   } else $('#layerRecord').addEventListener('click', startLayer);
-  $('#layerCountIn').addEventListener('click', () => {
+  // (Not there when the record row has given way to the line about Pro.)
+  $('#layerCountIn')?.addEventListener('click', () => {
     const on = !layerCountIn();
     try { localStorage.setItem('alchemy.layerCountIn', on ? '1' : '0'); } catch { /* storage unavailable */ }
     haptic();
@@ -3418,6 +3419,8 @@ document.addEventListener('visibilitychange', () => {
 });
 
 setAudioSession('playback');
+// The app's screens don't zoom (a browser keeps pinch-zoom, for accessibility).
+if (isNative) $('meta[name="viewport"]').setAttribute('content', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover');
 // Pro: everything on the web; in the app, the last known answer straight away,
 // then the App Store's (which works offline too).
 if (!isNative) setPro(true);
