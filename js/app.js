@@ -1,4 +1,4 @@
-import { extractTrack, segmentNotes, livePitch, normalizeLoudness, acRms, highpass, liveLowCut, loudness, LOUDNESS_TARGET } from './pitch.js';
+import { extractTrack, segmentNotes, livePitch, normalizeLoudness, acRms, highpass, liveLowCut, loudness, soundStart, LOUDNESS_TARGET } from './pitch.js';
 import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing, voiceLead, bassLine, detectTempo, beatsBetween, rankChords, METERS, barBeats, rateOf, RATES, PALETTES } from './theory.js';
 import { midiFile } from './midi.js';
 import { findOnsets, chooseGrid, anchorsFor, timeMap, warp, warpTrace } from './timing.js';
@@ -207,8 +207,11 @@ async function startRecording() {
   synth.stopTone();
   $('#capturePrompt').textContent = 'Get ready…';
   let mic;
+  // Audio that arrives while the mic is still settling is kept: without a count-in
+  // it becomes the start of the take, so singing straight after the tap isn't lost.
+  const early = [];
   try {
-    mic = await openMic(onChunk);
+    mic = await openMic((data, time) => (rec ? onChunk(data, time) : early.push([data, time])));
   } catch (e) {
     starting = false;
     $('#capturePrompt').textContent = 'Tap record, then sing or play a melody';
@@ -230,7 +233,16 @@ async function startRecording() {
   }, 200);
 
   if (state.countIn.on) startCountIn();
-  else $('#capturePrompt').textContent = 'Listening…';
+  else {
+    $('#capturePrompt').textContent = 'Listening…';
+    // Skip the first few blocks, where a mic can click as it opens.
+    let skip = Math.round(mic.sr * 0.05);
+    for (const [data, time] of early) {
+      if (skip >= data.length) { skip -= data.length; continue; }
+      onChunk(skip ? data.subarray(skip) : data, time == null ? time : time + skip / mic.sr);
+      skip = 0;
+    }
+  }
 }
 
 // One bar of clicks counted down (4-3-2-1 in 4/4); the take starts on the beat after
@@ -1046,7 +1058,14 @@ function takeRange() {
   for (const l of layers) end = Math.max(end, l.offset + l.duration);
   const beat = beatSpan();
   if (beat) end = Math.max(end, beat[1]);
-  const first = Math.min(n[0]?.start ?? Infinity, beat?.[0] ?? Infinity);
+  // From the first sound, even if the first notes were too soft to be picked out
+  const take = state.take;
+  if (take.soundStartFor !== take.samples) {
+    take.soundStart = soundStart(take.samples, take.sampleRate);
+    take.soundStartFor = take.samples;
+  }
+  const heard = take.soundStart >= trim.start ? take.soundStart : Infinity;
+  const first = Math.min(n[0]?.start ?? Infinity, beat?.[0] ?? Infinity, heard);
   return { start: Number.isFinite(first) ? Math.max(trim.start, first - 0.15) : trim.start, end };
 }
 

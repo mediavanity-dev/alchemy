@@ -67,6 +67,21 @@ export function loudness(x, sr) {
   return { active: Math.sqrt(loud.reduce((a, v) => a + v * v, 0) / loud.length), levels };
 }
 
+// When sound first rises clearly above the room (seconds), so playback can start
+// there even if the first notes were too soft or short to be picked out.
+export function soundStart(x, sr) {
+  const win = Math.max(1, Math.round(sr * 0.02));
+  const levels = [];
+  for (let i = 0; i + win <= x.length; i += win) levels.push(rmsOf(x.subarray(i, i + win)));
+  if (!levels.length) return 0;
+  const sorted = [...levels].sort((a, b) => a - b);
+  const floor = noiseFloor(sorted);
+  const loud = sorted[Math.floor(sorted.length * 0.9)];
+  const gate = Math.max(floor * 4, loud * 0.08);
+  const k = levels.findIndex((v) => v > gate);
+  return k < 0 ? 0 : (k * win) / sr;
+}
+
 // The room's background level: the quiet end of a take's short-window loudness
 // (sorted ascending). Frames of pure digital silence don't count.
 export function noiseFloor(sortedLevels) {
