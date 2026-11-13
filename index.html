@@ -32,10 +32,14 @@
       <div class="brand">
         <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 5 L28 26 H4 Z" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"/><path d="M10.5 19.5 q1.4 -2.4 2.8 0 t2.8 0 t2.8 0 t2.8 0" fill="none" stroke="var(--violet)" stroke-width="2" stroke-linecap="round"/></svg>
         <span>Alchemy</span>
+        <button class="pro-tag" id="proTag" hidden aria-label="Alchemy Pro">PRO</button>
       </div>
-      <button class="tone-btn" id="toneBtn" aria-label="Reference tone">
-        <svg viewBox="0 0 24 24"><path d="M9 3v7a3 3 0 0 0 6 0V3M12 13v8M9 21h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      </button>
+      <div class="top-actions">
+        <button class="upgrade-btn" id="proBtn" hidden>Upgrade</button>
+        <button class="tone-btn" id="toneBtn" aria-label="Reference tone">
+          <svg viewBox="0 0 24 24"><path d="M9 3v7a3 3 0 0 0 6 0V3M12 13v8M9 21h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
     </header>
 
     <main>
@@ -165,7 +169,7 @@
             <div class="control">
               <span class="label">Chords</span>
               <div class="seg" data-setting="palette">
-                <button data-value="triads" title="Three-note chords from the key">Triads</button><button data-value="extended" title="Adds 7ths, 6ths, add9 and sus4 chords">Extended</button><button data-value="chromatic" data-pro title="Adds borrowed chords and secondary dominants from outside the key">Chromatic</button>
+                <button data-value="triads" title="Three-note chords from the key">Triads</button><button data-value="extended" title="Adds 7ths, 6ths, add9 and sus4 chords">Extended</button><button data-value="chromatic" title="Adds borrowed chords and secondary dominants from outside the key">Chromatic</button>
               </div>
               <p class="no-choice" hidden>No other chord options for this progression</p>
             </div>
@@ -183,11 +187,11 @@
             <h2>Melody</h2>
             <div class="head-right">
               <span class="hint" id="tuningHint"></span>
-              <button class="text-btn" id="tuneBtn" data-pro>
+              <button class="text-btn" id="tuneBtn">
                 <svg viewBox="0 0 24 24"><path d="M3 12h3l2-5 4 10 3-7 2 2h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 <span id="tuneLabel">Tune</span>
               </button>
-              <button class="text-btn" id="timingBtn" data-pro>
+              <button class="text-btn" id="timingBtn">
                 <svg viewBox="0 0 24 24"><path d="M4 5v14M10 5v14M16 5v14M20 5v14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity=".45"/><circle cx="10" cy="12" r="2.6" fill="currentColor"/></svg>
                 <span id="timingLabel">Timing</span>
               </button>
@@ -222,10 +226,7 @@
 
       <!-- Library -->
       <section class="view" id="view-library" aria-label="Library">
-        <div class="page-head">
-          <h1 class="page-title">Library</h1>
-          <button class="pro-link" id="proBtn" hidden>Alchemy Pro</button>
-        </div>
+        <h1 class="page-title">Library</h1>
         <ul class="lib-list" id="libList"></ul>
         <div class="empty" id="libEmpty" hidden>
           <svg viewBox="0 0 64 64" aria-hidden="true"><path d="M18 8h28v48l-14-9-14 9z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/></svg>

@@ -987,12 +987,13 @@ function settingsWithoutChoice() {
   const notes = analysisNotes(), key = state.keys[state.keyIdx], base = harmonyOptions();
   const out = {};
   for (const [setting, values] of Object.entries(SETTING_VALUES)) {
-    const sigs = new Map(values.map((v) => [v, v === state[setting]
+    const open = values.filter((v) => v === state[setting] || !locked(setting, v));
+    const sigs = new Map(open.map((v) => [v, v === state[setting]
       ? progressionSig(state.harmony)
       : chartOf(harmonize(notes, key, { ...base, [setting]: v }), state.ideaIdx)]));
     const offered = new Set([sigs.get(state[setting])]);
-    out[setting] = new Set();
-    for (const v of values) {
+    out[setting] = new Set(values.filter((v) => !open.includes(v)));
+    for (const v of open) {
       if (v === state[setting]) continue;
       if (offered.has(sigs.get(v))) out[setting].add(v);
       else offered.add(sigs.get(v));
@@ -1183,9 +1184,12 @@ function renderHarmony() {
   const tuneLevel = TUNE_LEVELS.find((l) => l.amount === take.tune.amount);
   $('#tuneLabel').textContent = take.tune.amount ? `Tuned · ${tuneLevel?.label ?? ''}` : 'Tune';
   $('#tuneBtn').classList.toggle('strong', !!take.tune.amount);
-  const locked = take.timing?.applied;
-  $('#timingLabel').textContent = locked ? `Locked · ${locked === 'auto' ? 'auto' : gridName(locked, take.tempo?.meter)}` : 'Timing';
-  $('#timingBtn').classList.toggle('strong', !!locked);
+  const lockedTo = take.timing?.applied;
+  $('#timingLabel').textContent = lockedTo ? `Locked · ${lockedTo === 'auto' ? 'auto' : gridName(lockedTo, take.tempo?.meter)}` : 'Timing';
+  $('#timingBtn').classList.toggle('strong', !!lockedTo);
+  // Pro tools aren't shown until Pro is unlocked.
+  $('#tuneBtn').hidden = !state.pro;
+  $('#timingBtn').hidden = !state.pro;
 
   updateTransportStatus();
   $('#saveBtn').classList.toggle('saved', !!take.id && !take.dirty);
@@ -2066,11 +2070,10 @@ function locked(kind, value) {
 function setPro(on) {
   const was = state.pro;
   state.pro = on;
-  document.body.classList.toggle('pro-locks', !on);
   try { localStorage.setItem('alchemy.pro', on ? '1' : '0'); } catch { /* storage unavailable */ }
-  const btn = $('#proBtn');
-  btn.textContent = on ? 'Pro ✓' : 'Alchemy Pro';
-  btn.classList.toggle('owned', on);
+  // Upgrade in the top bar until Pro is bought, then a PRO tag by the name.
+  $('#proBtn').hidden = !isNative || on;
+  $('#proTag').hidden = !isNative || !on;
   if (was !== on && state.take) {
     if (!on && state.palette === 'chromatic') { state.palette = 'extended'; reharmonize(state.ideaIdx); }
     renderHarmony();
@@ -2157,6 +2160,7 @@ function openProSheet(reason = null) {
 }
 
 $('#proBtn').addEventListener('click', () => openProSheet());
+$('#proTag').addEventListener('click', () => openProSheet());
 
 // The beat the styles follow: the take's grid, or a steady 120 bpm from the first chord.
 function beatGrid(segs) {
@@ -2489,7 +2493,7 @@ const backingLabel = () => `${soundOf(chordSound()).name} · ${styleOf(chordStyl
 const optRow = (act, label, items, current) => `
   <div class="opt-label">${label}</div>
   <div class="opt-row" role="radiogroup" aria-label="Chord ${label.toLowerCase()}">${items.map((it) =>
-    `<button class="chip-sm ${it.id === current ? 'on' : ''}" data-act="${act}" data-v="${it.id}" role="radio" aria-checked="${it.id === current}"${locked(act, it.id) ? ' data-pro' : ''}>${it.name}</button>`).join('')}</div>`;
+    `<button class="chip-sm ${it.id === current ? 'on' : ''}" data-act="${act}" data-v="${it.id}" role="radio" aria-checked="${it.id === current}">${it.name}</button>`).join('')}</div>`;
 
 function openTracksSheet() {
   const take = state.take;
@@ -2529,6 +2533,8 @@ function openTracksSheet() {
       </div>`);
   };
   const full = take.layers.length >= MAX_LAYERS;
+  // Without Pro, one layer: then the record row gives way to a line about Pro.
+  const moreWithPro = !state.pro && take.layers.length >= FREE_LAYERS;
 
   openSheet(`<div class="tracks-sheet">
     <h3>Tracks</h3>
@@ -2539,21 +2545,24 @@ function openTracksSheet() {
       <div class="track-group">Backing</div>
       ${row('backing', 'backing', 'Chords', backingLabel(), `
       <div class="track-opts sound-opts">
-        ${optRow('sound', 'Sound', SOUNDS, chordSound())}
-        ${optRow('style', 'Style', STYLES, chordStyle())}
+        ${optRow('sound', 'Sound', SOUNDS.filter((s) => !locked('sound', s.id)), chordSound())}
+        ${optRow('style', 'Style', STYLES.filter((s) => !locked('style', s.id)), chordStyle())}
       </div>`)}
       ${row('guide', 'guide', 'Guide melody', 'Your notes, played clean')}
       ${take.tempo ? row('click', 'click', 'Click', `${Math.round(take.tempo.bpm)} bpm`) : ''}
     </div>
     <div class="record-row">
       <button class="pill ${layerCountIn() ? 'on' : ''}" id="layerCountIn" aria-pressed="${layerCountIn()}">${check}Count-in</button>
-      <button class="btn primary" id="layerRecord" ${full ? 'disabled' : ''}${!full && !state.pro && take.layers.length >= FREE_LAYERS ? ' data-pro' : ''}><span class="dot"></span>${full ? 'Layer limit reached' : state.loop ? 'Record passes' : 'Record a layer'}</button>
+      <button class="btn primary" id="layerRecord" ${full ? 'disabled' : ''}><span class="dot"></span>${full ? 'Layer limit reached' : state.loop ? 'Record passes' : 'Record a layer'}</button>
     </div>
-    ${state.loop && !full ? `<p class="record-note">${state.pro ? 'Loop is on: each time round is kept as a pass, and you pick the best.' : 'Loop is on: the last time round is kept. Alchemy Pro keeps every pass so you can pick the best.'}</p>` : ''}
+    ${state.loop && !full && !moreWithPro ? `<p class="record-note">${state.pro ? 'Loop is on: each time round is kept as a pass, and you pick the best.' : 'Loop is on: the last time round is kept.'}</p>` : ''}
   </div>`);
 
   const body = $('#sheetBody .tracks-sheet');
-  $('#layerRecord').addEventListener('click', startLayer);
+  if (moreWithPro) {
+    body.querySelector('.record-row').outerHTML = '<button class="layer-more" id="layerMore">More layers come with <b>Alchemy Pro</b></button>';
+    $('#layerMore').addEventListener('click', () => openProSheet('layers'));
+  } else $('#layerRecord').addEventListener('click', startLayer);
   $('#layerCountIn').addEventListener('click', () => {
     const on = !layerCountIn();
     try { localStorage.setItem('alchemy.layerCountIn', on ? '1' : '0'); } catch { /* storage unavailable */ }
@@ -3238,9 +3247,9 @@ $('#shareBtn').addEventListener('click', () => {
   openSheet(`
     <h3>Share</h3>
     <button class="btn block" id="shareChart">Chord chart (text)</button>
-    <button class="btn primary block" id="shareMidi"${state.pro ? '' : ' data-pro'}>MIDI file: melody, chords and bass</button>`);
+    ${state.pro ? '<button class="btn primary block" id="shareMidi">MIDI file: melody, chords and bass</button>' : ''}`);
   $('#shareChart').addEventListener('click', () => { closeSheet(); shareChart(); });
-  $('#shareMidi').addEventListener('click', () => withPro('midi', () => { closeSheet(); shareMidi(); }));
+  $('#shareMidi')?.addEventListener('click', () => withPro('midi', () => { closeSheet(); shareMidi(); }));
 });
 
 async function shareChart() {
@@ -3401,7 +3410,6 @@ document.addEventListener('visibilitychange', () => {
 setAudioSession('playback');
 // Pro: everything on the web; in the app, the last known answer straight away,
 // then the App Store's (which works offline too).
-$('#proBtn').hidden = !isNative;
 if (!isNative) setPro(true);
 else {
   let known = false;

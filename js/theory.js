@@ -489,7 +489,9 @@ export function harmonize(notes, key, { rhythm: rate = 'bar', palette = 'triads'
 
   // Other ideas: search again with the chords already suggested for each window
   // made a little less attractive, keeping results that differ for at least a
-  // quarter of the time from every idea so far.
+  // quarter of the time from every idea so far, and use a different set of chords
+  // (the same chords in another order read as the same progression).
+  const chordSet = (path) => [...new Set(path.map((j) => vocab[j].symbol))].sort().join(' ');
   const paths = [run.best.path];
   const used = wins.map(() => new Float32Array(vocab.length));
   let last = run.best.path;
@@ -498,7 +500,7 @@ export function harmonize(notes, key, { rhythm: rate = 'bar', palette = 'triads'
     const E2 = E.map((row, t) => row.map((v, j) => v - 0.45 * used[t][j]));
     last = repeatChords(decode(E2, wins, vocab, idioms).path, ties);
     const span = (p, q) => p.reduce((a, j, t) => a + (j === q[t] ? 0 : wins[t].end - wins[t].start), 0);
-    if (paths.every((p) => span(p, last) >= 0.25 * (t1 - t0))) paths.push(last);
+    if (paths.every((p) => span(p, last) >= 0.25 * (t1 - t0) && chordSet(p) !== chordSet(last))) paths.push(last);
   }
 
   const toSegments = (path) => {
