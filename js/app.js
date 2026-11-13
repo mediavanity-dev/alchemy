@@ -482,7 +482,7 @@ async function stopRecording() {
 
   if (r.counting) return; // cancelled during the count-in
   if (r.length < r.sr * 0.8) {
-    toast('That was a bit short. Hum a phrase of a few notes.');
+    toast('That was a bit short. Sing or hum for a second or more.');
     return;
   }
   // With a count-in, the beat grid is known exactly: the take starts on a downbeat.
@@ -795,16 +795,16 @@ async function processAudio(samples, sampleRate, name, tempo = null) {
   await new Promise((r) => setTimeout(r, 250));
   setProcessing(false);
 
-  // Too few notes for a tune but a clear beat (beatbox, tapping): it loads as a
-  // beat, with its tempo and chords in a key across it. A tune can go on top as a
-  // layer and lead the chords from there.
-  // Stray "notes" in a beat (a kick's thump) aren't a tune to follow.
+  // A beat (beatbox, tapping) loads as a beat, with its tempo and chords in a key
+  // across it; a tune can go on top as a layer and lead the chords from there.
+  // Stray "notes" in a beat (a kick's thump) aren't a tune to follow. Anything
+  // else with even one clear note is a tune, however short.
   let hits = null;
-  if (notes.length < 3 || kind === 'rhythm') {
+  if (notes.length === 0 || kind === 'rhythm') {
     hits = hitsOf(raw, sampleRate);
     if (hits.length >= 4) notes = [];
-    else if (notes.length < 3) {
-      toast("I couldn't hear that clearly. Try singing or playing a little louder.", 5000);
+    else if (!notes.length) {
+      toast("I couldn't hear a note. Try singing or playing a little louder.", 5000);
       return;
     } else hits = null;
   }
@@ -910,7 +910,7 @@ function findKeys() {
 // A beat-only take (no tune of its own): where its hits start and end within the trim.
 function beatSpan() {
   const take = state.take;
-  if (!take?.hits?.length || take.notes.length >= 3) return null;
+  if (!take?.hits?.length || take.notes.length) return null;
   const { start, end } = take.trim;
   const ts = take.hits.map((h) => h.t).filter((t) => t >= start - 0.05 && t <= end);
   return ts.length >= 2 ? [ts[0], Math.min(end, ts[ts.length - 1] + 0.3)] : null;
@@ -1447,7 +1447,7 @@ $('#trimApply').addEventListener('click', async () => {
   }
   const frames = take.track.frames.filter((f) => f.t >= start && f.t <= end);
   const r = segmentNotes({ frames, hop: take.track.hop });
-  if (r.notes.length < 3 && !take.hits?.length) {
+  if (!r.notes.length && !take.hits?.length) {
     toast('Not enough melody in that selection. Try a wider trim.');
     return;
   }
@@ -2069,7 +2069,7 @@ async function stopLayer() {
   if (kind === 'rhythm' && take.tempo?.source !== 'countin' && !take.tempo?.manual) { retempo(); regrid(); }
   markDirty();
   // Over a beat-only take, the first tune sung on top leads the chords straight away.
-  if (beatSpan() && kind === 'melody' && layer.notes.length >= 3 && !take.layers.some((l) => l.included)) {
+  if (beatSpan() && kind === 'melody' && layer.notes.length && !take.layers.some((l) => l.included)) {
     layer.included = true;
     reanalyze();
   } else renderHarmony();
