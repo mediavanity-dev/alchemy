@@ -1,5 +1,6 @@
 import UIKit
 import AVFoundation
+import StoreKit
 import Capacitor
 
 class SceneDelegate: UIResponder, UIWindowSceneDelegate {
@@ -43,13 +44,24 @@ class AppViewController: CAPBridgeViewController {
 //   copied in the moment iOS hands it over (its own copy may be lent only briefly),
 //   then decoded here to a short WAV the web view can read, so a long memo never
 //   has to be decoded whole in the page.
+// - the library: saved takes as files in Application Support, which iOS keeps
+//   (and backs up), unlike web storage, which it may clear when space runs low.
+// - Alchemy Pro: a one-time in-app purchase (StoreKit 2).
 @objc(AlchemyPlugin)
 public class AlchemyPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "AlchemyPlugin"
     public let jsName = "Alchemy"
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "headphones", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "takeOpenedFiles", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "takeOpenedFiles", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "libList", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "libRead", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "libWrite", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "libMove", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "libDelete", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "proStatus", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "buyPro", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "restorePro", returnType: CAPPluginReturnPromise)
     ]
 
     private static weak var shared: AlchemyPlugin?
@@ -57,8 +69,174 @@ public class AlchemyPlugin: CAPPlugin, CAPBridgedPlugin {
     private static var pending: [(url: URL?, name: String)] = []
     private static let lock = NSLock()
 
+    private var purchaseUpdates: Task<Void, Never>?
+
     override public func load() {
         AlchemyPlugin.shared = self
+        // Purchases completed outside the app's own flow (Ask to Buy approved later,
+        // a refund, a purchase on another device): finish them and tell the page.
+        purchaseUpdates = Task.detached { [weak self] in
+            for await result in Transaction.updates {
+                if case .verified(let transaction) = result { await transaction.finish() }
+                await self?.announcePro()
+            }
+        }
+    }
+
+    // MARK: Library files
+
+    private static let fileQueue = DispatchQueue(label: "alchemy.library")
+
+    private static func takesDirectory() throws -> URL {
+        let base = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        let dir = base.appendingPathComponent("Takes", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    // A file in the takes folder. Names are plain (no folders), so a page can't reach elsewhere.
+    private static func takeFile(_ name: String?) throws -> URL {
+        guard let name = name, !name.isEmpty, !name.contains("/"), !name.hasPrefix(".") else {
+            throw NSError(domain: "Alchemy", code: 10, userInfo: [NSLocalizedDescriptionKey: "Bad file name"])
+        }
+        return try takesDirectory().appendingPathComponent(name)
+    }
+
+    private func onFiles(_ call: CAPPluginCall, _ work: @escaping () throws -> [String: Any]) {
+        AlchemyPlugin.fileQueue.async {
+            do { call.resolve(try work()) } catch { call.reject(error.localizedDescription) }
+        }
+    }
+
+    @objc func libList(_ call: CAPPluginCall) {
+        onFiles(call) {
+            let names = try FileManager.default.contentsOfDirectory(atPath: try AlchemyPlugin.takesDirectory().path)
+            return ["names": names.filter { !$0.hasPrefix(".") && !$0.hasSuffix(".part") }]
+        }
+    }
+
+    // Part of a file, base64: { data, size }. Without offset/length, the whole file.
+    @objc func libRead(_ call: CAPPluginCall) {
+        onFiles(call) {
+            let url = try AlchemyPlugin.takeFile(call.getString("name"))
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            let size = try handle.seekToEnd()
+            let offset = min(UInt64(max(0, call.getInt("offset") ?? 0)), size)
+            let length = min(call.getInt("length").map { UInt64(max(0, $0)) } ?? size, size - offset)
+            try handle.seek(toOffset: offset)
+            let data = try handle.read(upToCount: Int(length)) ?? Data()
+            return ["data": data.base64EncodedString(), "size": size]
+        }
+    }
+
+    // Writes (or with append, adds to) a file from base64 data.
+    @objc func libWrite(_ call: CAPPluginCall) {
+        onFiles(call) {
+            let url = try AlchemyPlugin.takeFile(call.getString("name"))
+            guard let data = Data(base64Encoded: call.getString("data") ?? "") else {
+                throw NSError(domain: "Alchemy", code: 11, userInfo: [NSLocalizedDescriptionKey: "Bad data"])
+            }
+            if call.getBool("append") ?? false, FileManager.default.fileExists(atPath: url.path) {
+                let handle = try FileHandle(forWritingTo: url)
+                defer { try? handle.close() }
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+            } else {
+                try data.write(to: url, options: .atomic)
+            }
+            return [:]
+        }
+    }
+
+    // Renames a file, replacing any file already there (how a finished save lands).
+    @objc func libMove(_ call: CAPPluginCall) {
+        onFiles(call) {
+            let from = try AlchemyPlugin.takeFile(call.getString("from"))
+            let to = try AlchemyPlugin.takeFile(call.getString("to"))
+            if FileManager.default.fileExists(atPath: to.path) {
+                _ = try FileManager.default.replaceItemAt(to, withItemAt: from)
+            } else {
+                try FileManager.default.moveItem(at: from, to: to)
+            }
+            return [:]
+        }
+    }
+
+    @objc func libDelete(_ call: CAPPluginCall) {
+        onFiles(call) {
+            let url = try AlchemyPlugin.takeFile(call.getString("name"))
+            if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+            return [:]
+        }
+    }
+
+    // MARK: Alchemy Pro
+
+    static let proProduct = "com.mediavanity.alchemy.pro"
+
+    private static func ownsPro() async -> Bool {
+        for await result in Transaction.currentEntitlements {
+            if case .verified(let t) = result, t.productID == proProduct, t.revocationDate == nil { return true }
+        }
+        return false
+    }
+
+    private func announcePro() async {
+        let pro = await AlchemyPlugin.ownsPro()
+        DispatchQueue.main.async { self.notifyListeners("proChanged", data: ["pro": pro]) }
+    }
+
+    // { pro, price? }: whether Pro is owned, and its price in the local currency
+    // when the App Store can be reached.
+    @objc func proStatus(_ call: CAPPluginCall) {
+        Task {
+            var out: [String: Any] = ["pro": await AlchemyPlugin.ownsPro()]
+            if let product = try? await Product.products(for: [AlchemyPlugin.proProduct]).first {
+                out["price"] = product.displayPrice
+            }
+            call.resolve(out)
+        }
+    }
+
+    // { pro, cancelled?, pending?, error? }
+    @objc func buyPro(_ call: CAPPluginCall) {
+        Task {
+            do {
+                guard let product = try await Product.products(for: [AlchemyPlugin.proProduct]).first else {
+                    call.resolve(["pro": false, "error": "unavailable"])
+                    return
+                }
+                switch try await product.purchase() {
+                case .success(let verification):
+                    if case .verified(let transaction) = verification {
+                        await transaction.finish()
+                        call.resolve(["pro": true])
+                    } else {
+                        call.resolve(["pro": false, "error": "unverified"])
+                    }
+                case .pending:
+                    call.resolve(["pro": false, "pending": true])
+                case .userCancelled:
+                    call.resolve(["pro": false, "cancelled": true])
+                @unknown default:
+                    call.resolve(["pro": false])
+                }
+            } catch {
+                call.resolve(["pro": false, "error": error.localizedDescription])
+            }
+        }
+    }
+
+    // Restore Purchases: syncs with the App Store (it may ask the user to sign in).
+    @objc func restorePro(_ call: CAPPluginCall) {
+        Task {
+            var failed: String? = nil
+            do { try await AppStore.sync() } catch { failed = error.localizedDescription }
+            var out: [String: Any] = ["pro": await AlchemyPlugin.ownsPro()]
+            if let failed = failed { out["error"] = failed }
+            call.resolve(out)
+        }
     }
 
     private static let headphonePorts: Set<AVAudioSession.Port> = [

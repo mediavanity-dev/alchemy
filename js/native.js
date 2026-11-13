@@ -13,6 +13,22 @@ async function native() {
   return plugins;
 }
 
+// Alchemy's own native plugin (library files, Pro, headphones, shared audio).
+export async function nativePlugin() {
+  return (await native()).Alchemy;
+}
+
+// Alchemy Pro, the one-time in-app purchase. Each returns { pro, ... }:
+// status() also gives the local price when the App Store can be reached; buy()
+// may say cancelled, pending (Ask to Buy) or error; restore() may say error.
+export const pro = {
+  status: async () => (await nativePlugin()).proStatus(),
+  buy: async () => (await nativePlugin()).buyPro(),
+  restore: async () => (await nativePlugin()).restorePro(),
+  // Calls back with true/false when ownership changes outside the app's own flow.
+  onChange: async (cb) => (await nativePlugin()).addListener('proChanged', ({ pro: owned }) => cb(!!owned)),
+};
+
 // Whether the phone's sound is going to headphones (wired, USB or Bluetooth).
 // A browser can't tell, so the web version always answers false.
 export async function headphonesIn() {

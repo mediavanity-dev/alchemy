@@ -498,6 +498,17 @@ main { flex: 1; position: relative; overflow: hidden; }
 
 /* ---------- library ---------- */
 .page-title { font-family: var(--serif); font-weight: 500; font-size: 30px; margin: 4px 0 14px; }
+.page-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.pro-link { flex: none; min-height: 34px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--gold); color: var(--gold); font-size: 13px; font-weight: 600; }
+.pro-link.owned { border-color: var(--line); color: var(--muted); font-weight: 500; }
+/* Features that come with Alchemy Pro, until it's unlocked */
+body.pro-locks [data-pro]::after { content: 'PRO'; display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 6px; font-size: 9px; font-weight: 700; letter-spacing: 0.05em; line-height: 1.5; background: var(--gold); color: var(--gold-ink); vertical-align: 1px; }
+.pro-list { list-style: none; margin: 4px 0 18px; padding: 0; display: grid; gap: 10px; font-size: 14px; line-height: 1.4; color: var(--muted); }
+.pro-list b { color: var(--text); font-weight: 600; }
+.pro-list li { padding-left: 22px; position: relative; }
+.pro-list li::before { content: ''; position: absolute; left: 4px; top: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--gold); }
+.pro-restore { display: block; margin: 10px auto 0; }
+.pro-fine { color: var(--faint); font-size: 12px; text-align: center; margin: 12px 0 0; }
 .lib-list { list-style: none; display: flex; flex-direction: column; gap: 10px; }
 .lib-item { display: flex; align-items: stretch; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--line); overflow: hidden; }
 .lib-open { flex: 1; min-width: 0; padding: 14px 4px 14px 16px; text-align: left; display: flex; flex-direction: column; gap: 4px; }

@@ -33,9 +33,9 @@ Append `#demo` to the URL to load a built-in demo melody without a microphone.
 | `js/tune.js` | Optional pitch correction (TD-PSOLA) toward the nearest note or the key. |
 | `js/synth.js` | Web Audio output chain (mix buses, reverb, limiter), guide-melody lead, clicks, drum kit and recorded-audio playback. |
 | `js/instruments.js` | Chord sounds (warm pad, electric piano, plucked guitar, organ, strings, marimba; all synthesized and level-matched) and playing styles (held, on the beat, strum, arpeggio, bass & chord) laid on the beat grid. Playback, chord previews and MIDI export share the same notes. |
-| `js/db.js` | IndexedDB library (metadata and audio in separate stores). |
+| `js/db.js` | The library: IndexedDB in a browser; in the iPhone app, files in Application Support (kept and backed up by iOS, unlike web storage), with takes from older app versions moved across. |
 | `js/app.js` | UI: capture, harmony view (progressions, chord rate and chord set, offering only options that change the result), tracks and layers, chord alternatives sheet, save/share, library. |
-| `js/native.js` | iPhone app only: the iOS share sheet for chord charts and MIDI files, audio shared in from other apps (Voice Memos; copied in and decoded to WAV by the native Alchemy plugin in `ios/App/App/SceneDelegate.swift`), and whether headphones are in, so the click can keep time through a take without leaking into the mic. |
+| `js/native.js` | iPhone app only: the iOS share sheet for chord charts and MIDI files, audio shared in from other apps (Voice Memos; copied in and decoded to WAV by the native Alchemy plugin in `ios/App/App/SceneDelegate.swift`), whether headphones are in (so the click can keep time through a take without leaking into the mic), library files, and Alchemy Pro, a one-time in-app purchase (StoreKit 2, product `com.mediavanity.alchemy.pro`). |
 | `sw.js` | Network-first service worker so the web version opens offline (the iPhone app bundles its files instead). |
 
 ## iPhone app

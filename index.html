@@ -160,14 +160,14 @@
               <div class="seg" data-setting="rhythm" aria-label="How often the chord can change">
                 <button data-value="2bar">2 bars</button><button data-value="bar">Bar</button><button data-value="half">½ bar</button><button data-value="beat">Beat</button>
               </div>
-              <p class="no-choice" hidden>No other chord placements for this take</p>
+              <p class="no-choice" hidden>No other chord placements for this progression</p>
             </div>
             <div class="control">
               <span class="label">Chords</span>
               <div class="seg" data-setting="palette">
-                <button data-value="triads" title="Three-note chords from the key">Triads</button><button data-value="extended" title="Adds 7ths, 6ths, add9 and sus4 chords">Extended</button><button data-value="chromatic" title="Adds borrowed chords and secondary dominants from outside the key">Chromatic</button>
+                <button data-value="triads" title="Three-note chords from the key">Triads</button><button data-value="extended" title="Adds 7ths, 6ths, add9 and sus4 chords">Extended</button><button data-value="chromatic" data-pro title="Adds borrowed chords and secondary dominants from outside the key">Chromatic</button>
               </div>
-              <p class="no-choice" hidden>No other chord styles for this take</p>
+              <p class="no-choice" hidden>No other chord options for this progression</p>
             </div>
           </div>
 
@@ -183,11 +183,11 @@
             <h2>Melody</h2>
             <div class="head-right">
               <span class="hint" id="tuningHint"></span>
-              <button class="text-btn" id="tuneBtn">
+              <button class="text-btn" id="tuneBtn" data-pro>
                 <svg viewBox="0 0 24 24"><path d="M3 12h3l2-5 4 10 3-7 2 2h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 <span id="tuneLabel">Tune</span>
               </button>
-              <button class="text-btn" id="timingBtn">
+              <button class="text-btn" id="timingBtn" data-pro>
                 <svg viewBox="0 0 24 24"><path d="M4 5v14M10 5v14M16 5v14M20 5v14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity=".45"/><circle cx="10" cy="12" r="2.6" fill="currentColor"/></svg>
                 <span id="timingLabel">Timing</span>
               </button>
@@ -222,7 +222,10 @@
 
       <!-- Library -->
       <section class="view" id="view-library" aria-label="Library">
-        <h1 class="page-title">Library</h1>
+        <div class="page-head">
+          <h1 class="page-title">Library</h1>
+          <button class="pro-link" id="proBtn" hidden>Alchemy Pro</button>
+        </div>
         <ul class="lib-list" id="libList"></ul>
         <div class="empty" id="libEmpty" hidden>
           <svg viewBox="0 0 64 64" aria-hidden="true"><path d="M18 8h28v48l-14-9-14 9z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/></svg>

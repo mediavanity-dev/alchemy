@@ -7,7 +7,7 @@ import { tuneClip, targetFn } from './tune.js';
 import { analyze, classify, chromaOf, hitsOf, normalizePeak } from './sound.js';
 import * as store from './db.js';
 import { SOUNDS, STYLES, soundOf, styleOf, chordEvents, playNote } from './instruments.js';
-import { isNative, shareText, shareFile, onOpenedFile, headphonesIn } from './native.js';
+import { isNative, shareText, shareFile, onOpenedFile, headphonesIn, pro as proStore } from './native.js';
 
 const $ = (sel) => document.querySelector(sel);
 const MAX_SECONDS = 45;
@@ -36,6 +36,7 @@ const state = {
   countIn: { on: false, bpm: 100, meter: '4/4' },
   loop: false,
   metronome: false,
+  pro: !isNative, // see Alchemy Pro below
 };
 
 /* ---------- helpers ---------- */
@@ -873,12 +874,8 @@ function loadTake(take, saved = {}) {
   state.keyIdx = savedKey >= 0 ? savedKey : Math.min(saved.keyIdx ?? 0, state.keys.length - 1);
   state.rhythm = rateOf(saved.rhythm ?? state.rhythm);
   state.palette = { simple: 'triads', rich: 'chromatic' }[saved.palette] ?? saved.palette ?? state.palette;
-  reharmonize();
-  const ideas = state.harmony.alternatives ?? [];
-  if (saved.idea > 0 && ideas[saved.idea]) {
-    state.ideaIdx = saved.idea;
-    state.harmony.segments = ideas[saved.idea];
-  }
+  if (locked('palette', state.palette)) state.palette = 'extended';
+  reharmonize(saved.idea > 0 ? saved.idea : 0);
   state.overrides = saved.overrides ?? {};
   // Chord timing the user edited by hand
   if (saved.segments?.length) {
@@ -951,11 +948,14 @@ function trustedTempo() {
   return t && (t.source === 'countin' || t.manual) ? t : null;
 }
 
-function reharmonize() {
+// Re-fits the chords. `idea` is the progression to show (the nearest one there
+// is): changing "Chord every" or "Chords" keeps the progression you were on.
+function reharmonize(idea = 0) {
   if (!state.take) return;
   state.overrides = {};
-  state.ideaIdx = 0;
   state.harmony = harmonize(analysisNotes(), state.keys[state.keyIdx], harmonyOptions());
+  state.ideaIdx = ideaAt(state.harmony, idea);
+  if (state.ideaIdx > 0) state.harmony.segments = state.harmony.alternatives[state.ideaIdx];
   state.noChoice = settingsWithoutChoice();
   // A detected beat grid takes the bar lines the harmony settled on (a pickup moves them).
   const t = state.take.tempo;
@@ -963,12 +963,14 @@ function reharmonize() {
   markDirty();
 }
 
-// "Chord every" and "Chords" only offer options that would change what's on offer.
-// A short, simple tune, say, gets the same one chord at every rate but the beat.
-// An option counts as different when it gives a different set of progressions
-// (all of the "Progressions" choices, not just the first), so hiding one never
-// hides a progression you could otherwise reach. Options giving the same set as
-// one already offered are hidden (the current one always stays).
+// The three rows work top down: Progressions, then "Chord every", then "Chords".
+// "Chord every" and "Chords" only offer options that change the chord chart
+// you're looking at: the progression picked above, as each option would give it.
+// A short, simple tune, say, gets the same one chord at every rate but the beat,
+// so only "Bar" and "Beat" are offered; if no option would change anything, a
+// note says so instead. Of options that give the same chart, the first is offered
+// (the current one always stays). Changing a lower row never moves an upper one:
+// the progression number stays, and every row is re-checked against the result.
 // Returns { rhythm, palette }: the set of hidden values for each.
 const SETTING_VALUES = { rhythm: RATES, palette: PALETTES };
 // The chords and where each one changes. A chord repeated across bars counts once,
@@ -976,17 +978,18 @@ const SETTING_VALUES = { rhythm: RATES, palette: PALETTES };
 const progressionSig = (h) => h.segments
   .filter((s, i, all) => i === 0 || all[i - 1].chord.id !== s.chord.id)
   .map((s) => `${s.start.toFixed(2)}:${s.chord.id}`).join('|');
-// Every progression a harmony offers, in any order
-const ideasSig = (h) => (h.alternatives?.length ? h.alternatives : [h.segments])
-  .map((segments) => progressionSig({ segments })).sort().join('||');
+// The progression a harmony shows for a given Progressions choice: that one, or
+// its last if it offers fewer.
+const ideaAt = (h, i) => Math.max(0, Math.min(i, (h.alternatives?.length ?? 1) - 1));
+const chartOf = (h, i) => progressionSig({ segments: h.alternatives?.length ? h.alternatives[ideaAt(h, i)] : h.segments });
 
 function settingsWithoutChoice() {
   const notes = analysisNotes(), key = state.keys[state.keyIdx], base = harmonyOptions();
   const out = {};
   for (const [setting, values] of Object.entries(SETTING_VALUES)) {
     const sigs = new Map(values.map((v) => [v, v === state[setting]
-      ? ideasSig(state.harmony)
-      : ideasSig(harmonize(notes, key, { ...base, [setting]: v }))]));
+      ? progressionSig(state.harmony)
+      : chartOf(harmonize(notes, key, { ...base, [setting]: v }), state.ideaIdx)]));
     const offered = new Set([sigs.get(state[setting])]);
     out[setting] = new Set();
     for (const v of values) {
@@ -1007,6 +1010,7 @@ function setIdea(i) {
   state.ideaIdx = i;
   state.harmony.segments = ideas[i];
   state.overrides = {};
+  state.noChoice = settingsWithoutChoice();
   markDirty();
   renderHarmony();
   haptic();
@@ -1016,7 +1020,7 @@ function setIdea(i) {
 // has already picked or shaped chords by hand.
 function regrid() {
   if (Object.keys(state.overrides).length || hasEdits()) return;
-  reharmonize();
+  reharmonize(state.ideaIdx);
 }
 
 // Full re-analysis after the material changed (trim, layer opted in or out).
@@ -1452,6 +1456,7 @@ document.querySelectorAll('.seg[data-setting]').forEach((seg) =>
     if (!b) return;
     const setting = seg.dataset.setting;
     if (state[setting] === b.dataset.value) return;
+    if (locked(setting, b.dataset.value)) { openProSheet(setting); return; }
     state[setting] = b.dataset.value;
     if (setting === 'mode') {
       const wasPlaying = !!state.playing;
@@ -1459,7 +1464,7 @@ document.querySelectorAll('.seg[data-setting]').forEach((seg) =>
       if (wasPlaying) startPlayback();
     } else {
       stopPlayback();
-      reharmonize();
+      reharmonize(state.ideaIdx);
       renderHarmony();
     }
     haptic();
@@ -2030,8 +2035,128 @@ function audition(chord) {
 
 const pref = (k, fallback) => { try { return localStorage.getItem(k) ?? fallback; } catch { return fallback; } };
 // Takes saved before there was a choice keep the original pad, held.
-const chordSound = () => state.take?.mix.backing.sound ?? 'pad';
-const chordStyle = () => state.take?.mix.backing.style ?? 'held';
+const chordSound = () => {
+  const s = state.take?.mix.backing.sound ?? 'pad';
+  return locked('sound', s) ? 'pad' : s;
+};
+const chordStyle = () => {
+  const s = state.take?.mix.backing.style ?? 'held';
+  return locked('style', s) ? 'held' : s;
+};
+
+/* ---------- Alchemy Pro ---------- */
+
+// The iPhone app is free, with extras in Alchemy Pro, a one-time purchase. The
+// free app does the whole job (record, key, every progression, playback, trim,
+// loop, a layer, an unlimited library); Pro adds sounds, styles, chromatic chords,
+// more layers, lock-to-beat and tune, and MIDI export. The web version has it all.
+const FREE_SOUNDS = ['pad', 'epiano'];
+const FREE_STYLES = ['held', 'beats'];
+const FREE_LAYERS = 1;
+let proPrice = null;
+
+function locked(kind, value) {
+  if (state.pro) return false;
+  if (kind === 'sound') return !FREE_SOUNDS.includes(value);
+  if (kind === 'style') return !FREE_STYLES.includes(value);
+  if (kind === 'palette') return value === 'chromatic';
+  return true;
+}
+
+function setPro(on) {
+  const was = state.pro;
+  state.pro = on;
+  document.body.classList.toggle('pro-locks', !on);
+  try { localStorage.setItem('alchemy.pro', on ? '1' : '0'); } catch { /* storage unavailable */ }
+  const btn = $('#proBtn');
+  btn.textContent = on ? 'Pro ✓' : 'Alchemy Pro';
+  btn.classList.toggle('owned', on);
+  if (was !== on && state.take) {
+    if (!on && state.palette === 'chromatic') { state.palette = 'extended'; reharmonize(state.ideaIdx); }
+    renderHarmony();
+  }
+}
+
+// Runs `then` with Pro, or explains Pro and offers it.
+function withPro(reason, then) {
+  if (state.pro) return then();
+  openProSheet(reason);
+}
+
+const PRO_REASONS = {
+  sound: 'That sound comes with Alchemy Pro.',
+  style: 'That playing style comes with Alchemy Pro.',
+  palette: 'Chromatic chords come with Alchemy Pro.',
+  layers: 'The free app keeps one layer. Alchemy Pro adds as many as you like.',
+  timing: 'Lock to beat comes with Alchemy Pro.',
+  tune: 'Tune comes with Alchemy Pro.',
+  midi: 'MIDI export comes with Alchemy Pro.',
+};
+
+function openProSheet(reason = null) {
+  const owned = state.pro;
+  openSheet(`<div class="pro-sheet">
+    <h3>Alchemy Pro</h3>
+    <p class="sub">${owned ? 'Pro is unlocked. Thank you for supporting Alchemy!' : `${PRO_REASONS[reason] ? `${PRO_REASONS[reason]} ` : ''}One purchase, yours to keep, and shared with your family through Family Sharing.`}</p>
+    <ul class="pro-list">
+      <li><b>Four more chord sounds:</b> guitar, organ, strings and marimba</li>
+      <li><b>Three more playing styles:</b> strum, arpeggio, and bass &amp; chord</li>
+      <li><b>Chromatic chords:</b> borrowed chords and secondary dominants</li>
+      <li><b>Unlimited layers,</b> with every pass of a loop recording kept</li>
+      <li><b>Lock to beat and Tune</b> for your melody</li>
+      <li><b>MIDI export</b> of melody, chords and bass to GarageBand, Logic or any DAW</li>
+    </ul>
+    ${owned ? '' : `<button class="btn primary block" id="proBuy">${proPrice ? `Unlock Pro · ${esc(proPrice)}` : 'Unlock Pro'}</button>`}
+    <button class="text-btn pro-restore" id="proRestore">Restore purchases</button>
+    ${owned ? '' : '<p class="pro-fine">Everything else in Alchemy stays free, including your whole library.</p>'}
+  </div>`);
+  if (!owned && !proPrice) {
+    proStore.status().then((r) => {
+      proPrice = r.price ?? null;
+      const b = $('#proBuy');
+      if (b && proPrice && !b.disabled) b.textContent = `Unlock Pro · ${proPrice}`;
+    }).catch(() => {});
+  }
+  $('#proBuy')?.addEventListener('click', async (e) => {
+    const b = e.currentTarget;
+    b.disabled = true;
+    b.textContent = 'Connecting to the App Store…';
+    let r = {};
+    try { r = await proStore.buy(); } catch { r = { error: 'failed' }; }
+    if (r.pro) {
+      setPro(true);
+      closeSheet();
+      toast('Alchemy Pro unlocked. Thank you!');
+      haptic([8, 40, 8]);
+      return;
+    }
+    b.disabled = false;
+    b.textContent = proPrice ? `Unlock Pro · ${proPrice}` : 'Unlock Pro';
+    if (r.cancelled) return;
+    if (r.pending) toast('Waiting for approval. Pro unlocks as soon as the purchase goes through.', 5000);
+    else if (r.error === 'unavailable') toast("Pro isn't available right now. Please try again later.", 4200);
+    else toast("The purchase didn't go through. Please try again.", 4200);
+  });
+  $('#proRestore').addEventListener('click', async (e) => {
+    const b = e.currentTarget;
+    b.disabled = true;
+    b.textContent = 'Checking…';
+    let r = {};
+    try { r = await proStore.restore(); } catch { r = { error: 'failed' }; }
+    b.disabled = false;
+    b.textContent = 'Restore purchases';
+    if (r.pro) {
+      const had = state.pro;
+      setPro(true);
+      if (!had) { closeSheet(); toast('Alchemy Pro restored.'); }
+      else toast('Pro is already unlocked.');
+    } else {
+      toast(r.error ? "Couldn't reach the App Store. Please try again." : 'No Pro purchase found for this Apple Account.', 4200);
+    }
+  });
+}
+
+$('#proBtn').addEventListener('click', () => openProSheet());
 
 // The beat the styles follow: the take's grid, or a steady 120 bpm from the first chord.
 function beatGrid(segs) {
@@ -2101,6 +2226,7 @@ let layerRec = null;
 
 async function startLayer() {
   const take = state.take;
+  if (!state.pro && take.layers.length >= FREE_LAYERS) { openProSheet('layers'); return; }
   closeSheet();
   stopPlayback();
   synth.stopTone();
@@ -2177,7 +2303,8 @@ async function stopLayer() {
   }
   setProcessing(false);
 
-  // Keep the last pass; the others stay a tap away in Tracks.
+  // Keep the last pass; the others stay a tap away in Tracks (with Pro).
+  if (!state.pro && passes.length > 1) passes.splice(0, passes.length - 1);
   const pick = passes.length - 1;
   const kind = passes[pick].kindAuto;
   const layer = {
@@ -2362,7 +2489,7 @@ const backingLabel = () => `${soundOf(chordSound()).name} · ${styleOf(chordStyl
 const optRow = (act, label, items, current) => `
   <div class="opt-label">${label}</div>
   <div class="opt-row" role="radiogroup" aria-label="Chord ${label.toLowerCase()}">${items.map((it) =>
-    `<button class="chip-sm ${it.id === current ? 'on' : ''}" data-act="${act}" data-v="${it.id}" role="radio" aria-checked="${it.id === current}">${it.name}</button>`).join('')}</div>`;
+    `<button class="chip-sm ${it.id === current ? 'on' : ''}" data-act="${act}" data-v="${it.id}" role="radio" aria-checked="${it.id === current}"${locked(act, it.id) ? ' data-pro' : ''}>${it.name}</button>`).join('')}</div>`;
 
 function openTracksSheet() {
   const take = state.take;
@@ -2420,9 +2547,9 @@ function openTracksSheet() {
     </div>
     <div class="record-row">
       <button class="pill ${layerCountIn() ? 'on' : ''}" id="layerCountIn" aria-pressed="${layerCountIn()}">${check}Count-in</button>
-      <button class="btn primary" id="layerRecord" ${full ? 'disabled' : ''}><span class="dot"></span>${full ? 'Layer limit reached' : state.loop ? 'Record passes' : 'Record a layer'}</button>
+      <button class="btn primary" id="layerRecord" ${full ? 'disabled' : ''}${!full && !state.pro && take.layers.length >= FREE_LAYERS ? ' data-pro' : ''}><span class="dot"></span>${full ? 'Layer limit reached' : state.loop ? 'Record passes' : 'Record a layer'}</button>
     </div>
-    ${state.loop && !full ? '<p class="record-note">Loop is on: each time round is kept as a pass, and you pick the best.</p>' : ''}
+    ${state.loop && !full ? `<p class="record-note">${state.pro ? 'Loop is on: each time round is kept as a pass, and you pick the best.' : 'Loop is on: the last time round is kept. Alchemy Pro keeps every pass so you can pick the best.'}</p>` : ''}
   </div>`);
 
   const body = $('#sheetBody .tracks-sheet');
@@ -2445,6 +2572,7 @@ function openTracksSheet() {
     const layer = take.layers.find((l) => l.id === id);
     const act = b.dataset.act;
     if (act === 'sound' || act === 'style') {
+      if (locked(act, b.dataset.v)) { openProSheet(act); return; }
       take.mix.backing = { ...take.mix.backing, [act]: b.dataset.v };
       try { localStorage.setItem(act === 'sound' ? 'alchemy.chordSound' : 'alchemy.chordStyle', b.dataset.v); } catch { /* storage unavailable */ }
       markDirty();
@@ -2545,7 +2673,7 @@ function voiceClip(clip) {
   return clip.tuned;
 }
 
-$('#tuneBtn').addEventListener('click', openTuneSheet);
+$('#tuneBtn').addEventListener('click', () => withPro('tune', openTuneSheet));
 
 function openTuneSheet() {
   const take = state.take;
@@ -2687,7 +2815,7 @@ async function applyTiming({ grid, amount, layers }) {
   return { moved, used };
 }
 
-$('#timingBtn').addEventListener('click', () => openTimingSheet());
+$('#timingBtn').addEventListener('click', () => withPro('timing', () => openTimingSheet()));
 
 function openTimingSheet(draft = null) {
   const take = state.take, tempo = take.tempo;
@@ -3110,9 +3238,9 @@ $('#shareBtn').addEventListener('click', () => {
   openSheet(`
     <h3>Share</h3>
     <button class="btn block" id="shareChart">Chord chart (text)</button>
-    <button class="btn primary block" id="shareMidi">MIDI file: melody, chords and bass</button>`);
+    <button class="btn primary block" id="shareMidi"${state.pro ? '' : ' data-pro'}>MIDI file: melody, chords and bass</button>`);
   $('#shareChart').addEventListener('click', () => { closeSheet(); shareChart(); });
-  $('#shareMidi').addEventListener('click', () => { closeSheet(); shareMidi(); });
+  $('#shareMidi').addEventListener('click', () => withPro('midi', () => { closeSheet(); shareMidi(); }));
 });
 
 async function shareChart() {
@@ -3271,6 +3399,17 @@ document.addEventListener('visibilitychange', () => {
 });
 
 setAudioSession('playback');
+// Pro: everything on the web; in the app, the last known answer straight away,
+// then the App Store's (which works offline too).
+$('#proBtn').hidden = !isNative;
+if (!isNative) setPro(true);
+else {
+  let known = false;
+  try { known = localStorage.getItem('alchemy.pro') === '1'; } catch { /* storage unavailable */ }
+  setPro(known);
+  proStore.status().then((r) => { proPrice = r.price ?? null; setPro(!!r.pro); }).catch(() => {});
+  proStore.onChange((on) => setPro(on)).catch(() => {});
+}
 state.countIn = loadCountIn();
 try { setLoop(localStorage.getItem('alchemy.loop') === '1'); } catch { /* storage unavailable */ }
 renderCountIn();
