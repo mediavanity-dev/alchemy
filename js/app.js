@@ -874,7 +874,7 @@ function loadTake(take, saved = {}) {
   state.keyIdx = savedKey >= 0 ? savedKey : Math.min(saved.keyIdx ?? 0, state.keys.length - 1);
   state.rhythm = rateOf(saved.rhythm ?? state.rhythm);
   state.palette = { simple: 'triads', rich: 'chromatic' }[saved.palette] ?? saved.palette ?? state.palette;
-  if (locked('palette', state.palette)) state.palette = 'extended';
+  if (locked('palette', state.palette)) state.palette = 'triads';
   reharmonize(saved.idea > 0 ? saved.idea : 0);
   state.overrides = saved.overrides ?? {};
   // Chord timing the user edited by hand
@@ -954,7 +954,7 @@ function reharmonize(idea = 0) {
   if (!state.take) return;
   state.overrides = {};
   state.harmony = harmonize(analysisNotes(), state.keys[state.keyIdx], harmonyOptions());
-  state.ideaIdx = ideaAt(state.harmony, idea);
+  state.ideaIdx = ideaAt(state.harmony, locked('idea', idea) ? 0 : idea);
   if (state.ideaIdx > 0) state.harmony.segments = state.harmony.alternatives[state.ideaIdx];
   state.noChoice = settingsWithoutChoice();
   // A detected beat grid takes the bar lines the harmony settled on (a pickup moves them).
@@ -1006,7 +1006,7 @@ function settingsWithoutChoice() {
 // in the same key.
 function setIdea(i) {
   const ideas = state.harmony?.alternatives ?? [];
-  if (!ideas[i] || i === state.ideaIdx) return;
+  if (!ideas[i] || i === state.ideaIdx || locked('idea', i)) return;
   stopPlayback();
   state.ideaIdx = i;
   state.harmony.segments = ideas[i];
@@ -1134,6 +1134,10 @@ function renderHarmony() {
     `<button data-i="${i}" class="${i === state.ideaIdx ? 'active' : ''}" aria-label="Progression ${i + 1} of ${ideaCount}">${i + 1}</button>`).join('');
   $('#ideaSeg').style.display = ideaCount < 2 ? 'none' : '';
   $('#ideaControl .no-choice').hidden = ideaCount >= 2;
+  // The free version has "Chord every"; Progressions and Chords come with Pro.
+  $('#ideaControl').style.display = state.pro ? '' : 'none';
+  $('#paletteControl').style.display = state.pro ? '' : 'none';
+  $('#rhythmControl').classList.toggle('wide', !state.pro);
   const tempoBtn = $('#tempoBtn');
   tempoBtn.hidden = !take.tempo;
   if (take.tempo) {
@@ -2051,9 +2055,10 @@ const chordStyle = () => {
 /* ---------- Alchemy Pro ---------- */
 
 // The iPhone app is free, with extras in Alchemy Pro, a one-time purchase. The
-// free app does the whole job (record, key, every progression, playback, trim,
-// loop, a layer, an unlimited library); Pro adds sounds, styles, chromatic chords,
-// more layers, lock-to-beat and tune, and MIDI export. The web version has it all.
+// free app does the whole job (record, key, a progression in triads with "Chord
+// every", playback, trim, loop, a layer, an unlimited library); Pro adds more
+// progressions, chord sets (extended, chromatic), sounds, styles, more layers,
+// lock-to-beat and tune, and MIDI export. The web version has it all.
 const FREE_SOUNDS = ['pad', 'epiano'];
 const FREE_STYLES = ['held', 'beats'];
 const FREE_LAYERS = 1;
@@ -2063,7 +2068,8 @@ function locked(kind, value) {
   if (state.pro) return false;
   if (kind === 'sound') return !FREE_SOUNDS.includes(value);
   if (kind === 'style') return !FREE_STYLES.includes(value);
-  if (kind === 'palette') return value === 'chromatic';
+  if (kind === 'palette') return value !== 'triads';
+  if (kind === 'idea') return value > 0;
   // Everything else (chord rate, progressions, mode…) is free.
   return false;
 }
@@ -2076,7 +2082,8 @@ function setPro(on) {
   $('#proBtn').hidden = !isNative || on;
   $('#proTag').hidden = !isNative || !on;
   if (was !== on && state.take) {
-    if (!on && state.palette === 'chromatic') { state.palette = 'extended'; reharmonize(state.ideaIdx); }
+    if (!on) { state.palette = 'triads'; reharmonize(0); }
+    else state.noChoice = settingsWithoutChoice();
     renderHarmony();
   }
 }
@@ -2090,7 +2097,8 @@ function withPro(reason, then) {
 const PRO_REASONS = {
   sound: 'That sound comes with Alchemy Pro.',
   style: 'That playing style comes with Alchemy Pro.',
-  palette: 'Chromatic chords come with Alchemy Pro.',
+  palette: 'Chord sets come with Alchemy Pro.',
+  idea: 'More progressions come with Alchemy Pro.',
   layers: 'The free app keeps one layer. Alchemy Pro adds as many as you like.',
   timing: 'Lock to beat comes with Alchemy Pro.',
   tune: 'Tune comes with Alchemy Pro.',
@@ -2105,7 +2113,8 @@ function openProSheet(reason = null) {
     <ul class="pro-list">
       <li><b>Four more chord sounds:</b> guitar, organ, strings and marimba</li>
       <li><b>Three more playing styles:</b> strum, arpeggio, and bass &amp; chord</li>
-      <li><b>Chromatic chords:</b> borrowed chords and secondary dominants</li>
+      <li><b>More progressions:</b> switch between several that fit, in each key</li>
+      <li><b>Chord sets:</b> extended chords (7ths, sus, add9) and chromatic, with borrowed chords</li>
       <li><b>Unlimited layers,</b> with every pass of a loop recording kept</li>
       <li><b>Lock to beat and Tune</b> for your melody</li>
       <li><b>MIDI export</b> of melody, chords and bass to GarageBand, Logic or any DAW</li>
