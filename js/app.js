@@ -7,11 +7,13 @@ import { tuneClip, targetFn } from './tune.js';
 import { analyze, classify, chromaOf, hitsOf, normalizePeak } from './sound.js';
 import * as store from './db.js';
 import { SOUNDS, STYLES, soundOf, styleOf, chordEvents, playNote } from './instruments.js';
-import { isNative, shareText, shareFile, onOpenedFile } from './native.js';
+import { isNative, shareText, shareFile, onOpenedFile, headphonesIn } from './native.js';
 
 const $ = (sel) => document.querySelector(sel);
 const MAX_SECONDS = 45;
 const MAX_IMPORT_SECONDS = 90;
+// Level of the count-in and recording click in headphones, where full level is harsh.
+const HEADPHONE_CLICK = 0.45;
 const MAX_LAYERS = 6;
 const MAX_LAYER_SECONDS = 90;
 const MIN_TRIM = 1;
@@ -149,8 +151,10 @@ async function openMic(onChunk) {
   // moment more for the output route to settle (Bluetooth headsets take a while).
   await Promise.race([flowing, new Promise((r) => setTimeout(r, 5000))]);
   await new Promise((r) => setTimeout(r, 250));
+  const headphones = await headphonesIn();
   return {
     sr: ctx.sampleRate,
+    headphones,
     latency: typeof settings.latency === 'number' ? settings.latency : 0.01,
     close() {
       if (node.port) node.port.onmessage = null;
@@ -237,7 +241,10 @@ function startCountIn() {
   const beat = 60 / bpm;
   const n = barBeats(meter);
   const t0 = ctx.currentTime + 0.3;
-  synth.countIn(t0, beat, n);
+  // In headphones the clicks are gentler, and keep time through the whole take
+  // (nothing leaks into the mic). On the speaker they stop on the 1.
+  const keepTime = rec.mic.headphones;
+  synth.countIn(t0, beat, n, keepTime ? HEADPHONE_CLICK : 1);
   // Align the take with when the singer actually hears the beat, plus the mic's own
   // delay: as reported, plus what the last count-in showed the report misses. The
   // count-in itself is measured when the take stops (see measureRoundTrip).
@@ -245,6 +252,16 @@ function startCountIn() {
   const assumed = outLatency + rec.mic.latency;
   const used = Math.max(0, assumed + latencyFix);
   Object.assign(rec, { counting: true, countT0: t0, beat, bpm, meter, bar: n, assumed, used, pre: [], startAt: t0 + n * beat + used });
+  if (keepTime) {
+    let next = n;
+    const r = rec;
+    const ahead = () => {
+      if (rec !== r) return;
+      for (; t0 + next * beat < ctx.currentTime + 1; next++) synth.countClick(t0 + next * beat, next % n === 0);
+      setTimeout(ahead, 250);
+    };
+    ahead();
+  }
   $('#capturePrompt').textContent = 'Get ready…';
   const noteEl = $('#liveNote');
   noteEl.classList.add('count');
@@ -570,7 +587,7 @@ function openCountInSheet() {
   const { on, bpm, meter } = state.countIn;
   openSheet(`<div class="count-sheet">
     <h3>Count-in</h3>
-    <p class="sub">One bar of clicks (4, 3, 2, 1 in 4/4) before recording starts, so you come in on time. The clicks stop on the 1 and aren't recorded.</p>
+    <p class="sub">One bar of clicks (4, 3, 2, 1 in 4/4) before recording starts, so you come in on time. On the speaker the clicks stop on the 1 and aren't recorded. With headphones in, a softer click keeps time through the whole take.</p>
     <div class="seg" role="group" aria-label="Count-in">
       <button data-on="0" class="${on ? '' : 'active'}">Off</button>
       <button data-on="1" class="${on ? 'active' : ''}">On</button>
@@ -635,6 +652,26 @@ function defaultName() {
 
 $('#recBtn').addEventListener('click', () => (rec ? stopRecording() : startRecording()));
 
+// In the iPhone app, Import offers Files and explains Voice Memos: iOS gives apps
+// no way into the Voice Memos library, so a memo comes in through its Share button
+// (see onOpenedFile below). In a browser it goes straight to the file picker.
+$('#importBtn').addEventListener('click', () => {
+  if (!isNative) { $('#fileInput').click(); return; }
+  openSheet(`<div class="import-sheet">
+    <h3>Import audio</h3>
+    <p class="sub">Bring in a recording of your tune. Alchemy uses up to the first ${MAX_IMPORT_SECONDS} seconds.</p>
+    <button class="btn primary block" id="importFiles">Choose from Files</button>
+    <h4>From Voice Memos</h4>
+    <ol class="howto">
+      <li>Open <b>Voice Memos</b> and tap your recording.</li>
+      <li>Tap <b>•••</b>, then <b>Share</b>.</li>
+      <li>Tap <b>Alchemy</b>. If it isn't in the row of apps, swipe to the end and tap <b>More</b>.</li>
+    </ol>
+    <p class="sub">Alchemy opens with the memo, ready to harmonize. You can also tap <b>Save to Files</b> there, then use Choose from Files.</p>
+  </div>`);
+  $('#importFiles').addEventListener('click', () => { closeSheet(); $('#fileInput').click(); });
+});
+
 $('#fileInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   e.target.value = '';
@@ -667,6 +704,7 @@ if (isNative) {
   onOpenedFile(async (data, name) => {
     if (rec || layerRec || starting) { toast('Finish recording first, then share the file again.'); return; }
     stopPlayback();
+    closeSheet();
     showView('capture');
     await importAudio(data, name);
   }, () => toast("Couldn't open that file.")).catch(() => {});
@@ -745,28 +783,20 @@ async function processAudio(samples, sampleRate, name, tempo = null) {
 
   const track = await trackOf(samples, sampleRate, (p) => setProcessing(true, 0.05 + p * 0.85));
   const { notes, offset, trace, traceT0, hop } = segmentNotes(track);
-  // The main take is the tune everything is built on (sung, or played on any melodic
-  // instrument); beats and chords go on top as layers.
-  const { kind, features } = classify(raw, sampleRate, track);
-  // Plucked and struck instruments are levelled by their peaks, so their attacks
-  // aren't rounded off the way loudness levelling (made for singing) would.
-  if (kind === 'melody' && features.decay < 0.6) samples = normalizePeak(raw, sampleRate);
+  // The main take is always treated as the tune everything is built on: whatever
+  // notes it has are harmonized, however rhythmic or chordal it sounded.
+  const { features } = classify(raw, sampleRate, track);
+  // Plucked and struck sounds (short, decaying notes) are levelled by their peaks,
+  // so their attacks aren't rounded off the way loudness levelling (made for
+  // singing) would.
+  if (features.decay < 0.6) samples = normalizePeak(raw, sampleRate);
   setProcessing(true, 1);
   await new Promise((r) => setTimeout(r, 250));
   setProcessing(false);
 
-  if (kind === 'rhythm') {
-    toast('That sounded like rhythm. Record your tune here first (sung or played, one note at a time), then add beats as a layer: Tracks, on the Harmony page.', 6500);
-    return;
-  }
   if (notes.length < 3) {
-    toast(kind === 'chords'
-      ? 'That sounded like chords. Record your tune here first, one note at a time, then add chords as a layer: Tracks, on the Harmony page.'
-      : "I couldn't hear a clear melody. Try singing or playing a little louder, one note at a time.", 6500);
+    toast("I couldn't hear a clear tune. Try singing or playing a little louder, one note at a time.", 5000);
     return;
-  }
-  if (kind === 'chords') {
-    setTimeout(() => toast('That sounded like chords. It works best to record the tune here, one note at a time, and add chords as a layer in Tracks.', 6000), 600);
   }
 
   const duration = samples.length / sampleRate;
@@ -1711,7 +1741,8 @@ function startPlayback({ countIn = false } = {}) {
     let clickFrom = start;
     if (countIn) {
       count = countInBar(start);
-      for (let k = 0; k < count.per; k++) synth.click(t0 + k * count.beat, k === 0);
+      const lead = synth.bus(layerRec?.mic.headphones ? HEADPHONE_CLICK : 1);
+      for (let k = 0; k < count.per; k++) synth.click(t0 + k * count.beat, k === 0, lead);
       clickFrom = count.land;
       start = count.from;
     }
@@ -1998,11 +2029,7 @@ async function stopLayer() {
   renderHarmony();
   toast(passes.length > 1
     ? `${r.name}: ${passes.length} passes recorded, keeping the last one. Pick another in Tracks.`
-    : {
-      melody: `${r.name} added as a melody. Turn on Harmony in Tracks to use it for the chords.`,
-      chords: `${r.name} sounds like chords. Turn on Harmony in Tracks to let them guide the progression.`,
-      rhythm: `${r.name} sounds like rhythm (${layer.hits.length} hits). Try Drum kit in Tracks.`,
-    }[kind], 4600);
+    : `${r.name} added`, passes.length > 1 ? 4600 : 1800);
   haptic([8, 40, 8]);
 }
 

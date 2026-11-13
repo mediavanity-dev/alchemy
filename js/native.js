@@ -8,9 +8,21 @@ let plugins = null;
 async function native() {
   if (!plugins) {
     const { registerPlugin } = await import('./vendor/capacitor-core.js');
-    plugins = { Share: registerPlugin('Share'), Filesystem: registerPlugin('Filesystem'), App: registerPlugin('App') };
+    plugins = { Share: registerPlugin('Share'), Filesystem: registerPlugin('Filesystem'), App: registerPlugin('App'), AudioRoute: registerPlugin('AudioRoute') };
   }
   return plugins;
+}
+
+// Whether the phone's sound is going to headphones (wired, USB or Bluetooth).
+// A browser can't tell, so the web version always answers false.
+export async function headphonesIn() {
+  if (!isNative) return false;
+  try {
+    const { AudioRoute } = await native();
+    return !!(await AudioRoute.current()).headphones;
+  } catch {
+    return false;
+  }
 }
 
 const cancelled = (err) => /cancel/i.test(err?.message ?? '');

@@ -249,8 +249,11 @@ export function classify(x, sr, track, hits = hitsOf(x, sr), chroma = chromaOf(x
   const features = { pitched: +pitched.toFixed(2), notes, poly, flatness: +flatness.toFixed(3), sustain: +sustain.toFixed(2), decay: +decay.toFixed(2) };
   const tonal = flatness < 0.1;
   let kind;
-  // A struck instrument playing a tune (marimba, piano) dies away like a drum, but moves in pitch.
+  // A tune moves between clear single pitches. That holds for a struck instrument
+  // (marimba, piano) or short sung notes, which die away like a drum, and for soft or
+  // breathy singing, which is noisier; when in doubt it's a melody.
   if (tonal && poly <= 2 && pitched >= 0.5 && notes >= 3) kind = 'melody';
+  else if (flatness < 0.3 && poly <= 2 && pitched >= 0.5 && notes >= 3) kind = 'melody';
   // Decay is the clearest sign of a struck sound; noisiness alone only counts when
   // extreme (shakers, brushes), since strummed strings can be fairly noisy too.
   else if (decay < 0.3 || sustain < 0.3 || flatness > 0.35 || (flatness > 0.2 && decay < 0.5)) kind = 'rhythm';

@@ -152,13 +152,19 @@ export class Synth {
   }
 
   // Count-in clicks before a recording. They bypass the reverb so no tail can
-  // ring on into the take, and can be cancelled on their own.
-  countIn(t0, beat, beats = 4) {
+  // ring on into the take, and can be cancelled on their own. With headphones the
+  // click can carry on through the take (countClick) at the same, gentler, level.
+  countIn(t0, beat, beats = 4, level = 1) {
     const ctx = this.ensure();
     this.stopCountIn();
     this.countOut = ctx.createGain();
+    this.countOut.gain.value = level;
     this.countOut.connect(this.master);
     for (let k = 0; k < beats; k++) this.click(t0 + k * beat, k === 0, this.countOut);
+  }
+
+  countClick(t, accent) {
+    if (this.countOut) this.click(t, accent, this.countOut);
   }
 
   stopCountIn() {
