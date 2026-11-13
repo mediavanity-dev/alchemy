@@ -387,6 +387,7 @@ main { flex: 1; position: relative; overflow: hidden; }
 
 .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
 @media (max-width: 459px) { .controls { grid-template-columns: 1fr; } }
+.control.wide { grid-column: 1 / -1; }
 .label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 .seg { display: flex; padding: 3px; border-radius: 12px; background: var(--surface); border: 1px solid var(--line); }
 .seg button { flex: 1; min-height: 36px; padding: 0 4px; border-radius: 9px; font-size: 13px; color: var(--muted); white-space: nowrap; transition: background 0.15s, color 0.15s; }

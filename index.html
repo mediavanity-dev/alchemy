@@ -142,6 +142,11 @@
           </div>
 
           <div class="controls">
+            <div class="control wide" id="ideaControl">
+              <span class="label" id="ideaLabel">Progressions</span>
+              <div class="seg" id="ideaSeg" aria-label="Other chord progressions for this melody in the same key"></div>
+              <p class="no-choice" hidden>No other progressions in this key</p>
+            </div>
             <div class="control">
               <span class="label">Chord every</span>
               <div class="seg" data-setting="rhythm" aria-label="How often the chord can change">
@@ -162,10 +167,6 @@
             <h2>Progression</h2>
             <div class="head-right">
               <span class="hint">Tap a chord to change it</span>
-              <button class="text-btn" id="ideaBtn" hidden title="Try another progression for the same melody">
-                <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v4.5h-4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                <span id="ideaText">Another idea</span>
-              </button>
             </div>
           </div>
           <div class="chords" id="chordList"></div>

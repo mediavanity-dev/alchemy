@@ -105,7 +105,8 @@ const device = { viewport: { width: 440, height: 956 }, deviceScaleFactor: 3, co
   await page.waitForTimeout(2600); // let the "Saved" toast go
   await page.click('[data-setting="palette"] [data-value="extended"]');
   await shot('harmony');
-  await page.locator('.chord-card').nth(2).click();
+  // Tapped in place: a normal click would scroll the cards into view, hiding the melody.
+  await page.evaluate(() => document.querySelectorAll('.chord-card')[2].click());
   await shot('alternatives');
   await closeSheet();
   await page.click('#layersBtn');

@@ -898,17 +898,17 @@ function settingsWithoutChoice() {
   return out;
 }
 
-// Shows the next of the suggested progressions.
-function nextIdea() {
+// Shows one of the suggested progressions: different chords for the same melody,
+// in the same key.
+function setIdea(i) {
   const ideas = state.harmony?.alternatives ?? [];
-  if (ideas.length < 2) return;
+  if (!ideas[i] || i === state.ideaIdx) return;
   stopPlayback();
-  state.ideaIdx = (state.ideaIdx + 1) % ideas.length;
-  state.harmony.segments = ideas[state.ideaIdx];
+  state.ideaIdx = i;
+  state.harmony.segments = ideas[i];
   state.overrides = {};
   markDirty();
   renderHarmony();
-  toast(`Idea ${state.ideaIdx + 1} of ${ideas.length}`, 1400);
   haptic();
 }
 
@@ -1005,9 +1005,13 @@ function renderHarmony() {
   const trimmed = take.trim.start > 0.05 || take.trim.end < take.duration - 0.05;
   $('#rollInfo').textContent = trimmed ? `${fmtTime(take.trim.start)}–${fmtTime(take.trim.end)}` : fmtTime(take.duration);
   $('#rollInfo').title = trimmed ? 'Trimmed section' : 'Recording length';
+  // The progressions on offer for this key, numbered; a note when there's only one
   const ideaCount = state.harmony.alternatives?.length ?? 0;
-  $('#ideaBtn').hidden = ideaCount < 2 || editing || trimming;
-  $('#ideaText').textContent = `Idea ${state.ideaIdx + 1} of ${ideaCount}`;
+  $('#ideaLabel').textContent = `Progressions in ${keyName(key)}`;
+  $('#ideaSeg').innerHTML = Array.from({ length: ideaCount }, (_, i) =>
+    `<button data-i="${i}" class="${i === state.ideaIdx ? 'active' : ''}" aria-label="Progression ${i + 1} of ${ideaCount}">${i + 1}</button>`).join('');
+  $('#ideaSeg').style.display = ideaCount < 2 ? 'none' : '';
+  $('#ideaControl .no-choice').hidden = ideaCount >= 2;
   const tempoBtn = $('#tempoBtn');
   tempoBtn.hidden = !take.tempo;
   if (take.tempo) {
@@ -1305,7 +1309,10 @@ $('#keyChips').addEventListener('click', (e) => {
   haptic();
 });
 
-$('#ideaBtn').addEventListener('click', nextIdea);
+$('#ideaSeg').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (b) setIdea(+b.dataset.i);
+});
 
 document.querySelectorAll('.seg[data-setting]').forEach((seg) =>
   seg.addEventListener('click', (e) => {
@@ -1703,7 +1710,28 @@ function startPlayback({ countIn = false } = {}) {
   };
   $('#playBtn').classList.add('playing');
   $('#playBtn').setAttribute('aria-label', 'Stop');
+  nowPlaying(true);
   tick();
+}
+
+// What the lock screen and Control Center show while a take plays. Without it the
+// phone falls back to the app's internal address ("localhost").
+function nowPlaying(playing) {
+  const ms = navigator.mediaSession;
+  if (!ms || typeof MediaMetadata === 'undefined' || !state.take) return;
+  const key = state.keys[state.keyIdx];
+  try {
+    ms.metadata = new MediaMetadata({
+      title: state.take.name || 'Alchemy',
+      artist: key ? `Alchemy · ${keyName(key)}` : 'Alchemy',
+      artwork: [{ src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png' }],
+    });
+    ms.playbackState = playing ? 'playing' : 'paused';
+  } catch { /* unsupported */ }
+}
+
+for (const [action, run] of [['play', () => startPlayback()], ['pause', () => stopPlayback()], ['stop', () => stopPlayback()]]) {
+  try { navigator.mediaSession?.setActionHandler(action, run); } catch { /* unsupported */ }
 }
 
 function tick() {
@@ -1765,6 +1793,7 @@ function stopPlayback() {
   cancelAnimationFrame(state.playing.raf);
   state.playing = null;
   synth.stop();
+  nowPlaying(false);
   $('#playBtn').classList.remove('playing');
   $('#playBtn').setAttribute('aria-label', 'Play');
   document.querySelectorAll('.chord-card.now').forEach((c) => c.classList.remove('now'));
@@ -2917,6 +2946,7 @@ document.addEventListener('visibilitychange', () => {
   if (layerRec) stopLayer();
   else stopPlayback();
   if (rec) stopRecording();
+  synth.sleep();
 });
 
 setAudioSession('playback');

@@ -34,6 +34,12 @@ export class Synth {
     return this.ctx;
   }
 
+  // The app went to the background: pause the audio engine, so the phone stops
+  // listing Alchemy as "Now Playing" on the lock screen. ensure() wakes it again.
+  sleep() {
+    if (this.ctx?.state === 'running') this.ctx.suspend().catch(() => {});
+  }
+
   // Opening or closing the mic switches a phone's audio route (call mode, Bluetooth
   // headset profiles, sample rate). A context that lives through the switch can stay
   // quiet or distorted, so the next ensure() builds a new one. Until then the old
