@@ -2041,7 +2041,7 @@ function chromaBlocks(l) {
   return l.blocks;
 }
 
-const defaultMix = () => ({ take: { on: true, vol: 1 }, backing: { on: true, vol: 0.45 }, guide: { on: false, vol: 0.7 }, click: { vol: 0.4 } });
+const defaultMix = () => ({ take: { on: true, vol: 1 }, backing: { on: true, vol: 0.55 }, guide: { on: false, vol: 0.7 }, click: { vol: 0.4 } });
 
 // A track of the mix: 'take', 'backing', 'guide', 'click' or a layer id.
 // A quiet take can only be lifted so far before the room's hiss gets loud, so it
