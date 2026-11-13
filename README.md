@@ -31,10 +31,12 @@ Append `#demo` to the URL to load a built-in demo melody without a microphone.
 | `js/midi.js` | Writes the melody, chords and bass as a standard MIDI file. |
 | `js/timing.js` | Lock to the beat: finds note and hit starts, picks the subdivision that best explains them, moves each onto the grid and time-stretches the audio between (WSOLA, pitch unchanged, attacks untouched). |
 | `js/tune.js` | Optional pitch correction (TD-PSOLA) toward the nearest note or the key. |
-| `js/synth.js` | Web Audio pad, lead, clicks, drum kit and recorded-audio playback, mixed per track, with a small reverb. |
+| `js/synth.js` | Web Audio output chain (mix buses, reverb, limiter), guide-melody lead, clicks, drum kit and recorded-audio playback. |
+| `js/instruments.js` | Chord sounds (warm pad, electric piano, plucked guitar, organ, strings, marimba; all synthesized and level-matched) and playing styles (held, on the beat, strum, arpeggio, bass & chord) laid on the beat grid. Playback, chord previews and MIDI export share the same notes. |
 | `js/db.js` | IndexedDB library (metadata and audio in separate stores). |
-| `js/app.js` | UI: capture, harmony view, tracks and layers, chord alternatives sheet, save/share, library. |
-| `sw.js` | Network-first service worker so the app opens offline. |
+| `js/app.js` | UI: capture, harmony view (progressions, chord rate and chord set, offering only options that change the result), tracks and layers, chord alternatives sheet, save/share, library. |
+| `js/native.js` | iPhone app only: the iOS share sheet for chord charts and MIDI files, and audio shared in from other apps (Voice Memos). |
+| `sw.js` | Network-first service worker so the web version opens offline (the iPhone app bundles its files instead). |
 
 ## iPhone app
 

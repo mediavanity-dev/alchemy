@@ -1,11 +1,12 @@
 import { extractTrack, segmentNotes, livePitch, normalizeLoudness, acRms, highpass, liveLowCut, loudness, LOUDNESS_TARGET } from './pitch.js';
-import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing, voiceLead, bassLine, detectTempo, beatsBetween, rankChords, METERS, barBeats, rateOf } from './theory.js';
+import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing, voiceLead, bassLine, detectTempo, beatsBetween, rankChords, METERS, barBeats, rateOf, RATES, PALETTES } from './theory.js';
 import { midiFile } from './midi.js';
 import { findOnsets, chooseGrid, anchorsFor, timeMap, warp, warpTrace } from './timing.js';
 import { Synth } from './synth.js';
 import { tuneClip, targetFn } from './tune.js';
 import { analyze, classify, chromaOf, hitsOf, normalizePeak } from './sound.js';
 import * as store from './db.js';
+import { SOUNDS, STYLES, soundOf, styleOf, chordEvents, playNote } from './instruments.js';
 import { isNative, shareText, shareFile, onOpenedFile } from './native.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -469,7 +470,10 @@ async function stopRecording() {
   }
   // With a count-in, the beat grid is known exactly: the take starts on a downbeat.
   const tempo = r.bpm ? { bpm: r.bpm, beat: 60 / r.bpm, downbeat: 0, steady: true, manual: true, source: 'countin', meter: r.meter } : null;
-  await processAudio(r.bpm ? alignToCountIn(r) : concat(r.chunks, r.length), r.sr, defaultName(), tempo);
+  // The last moment holds the tap on Stop, which levelling would make loud.
+  const samples = r.bpm ? alignToCountIn(r) : concat(r.chunks, r.length);
+  const tap = Math.round(r.sr * 0.15);
+  await processAudio(samples.length > tap * 4 ? samples.subarray(0, samples.length - tap) : samples, r.sr, defaultName(), tempo);
 }
 
 // The take, starting exactly where the singer heard the first beat after the
@@ -869,24 +873,30 @@ function reharmonize() {
   markDirty();
 }
 
-// "Chord every" and "Chords" only offer options that would change the progression.
+// "Chord every" and "Chords" only offer options that would change what's on offer.
 // A short, simple tune, say, gets the same one chord at every rate but the beat.
-// Options giving the same chords as one already offered are hidden (the current
-// one always stays). Returns { rhythm, palette }: the set of hidden values for each.
-const SETTING_VALUES = { rhythm: ['2bar', 'bar', 'half', 'beat'], palette: ['triads', 'extended', 'chromatic'] };
+// An option counts as different when it gives a different set of progressions
+// (all of the "Progressions" choices, not just the first), so hiding one never
+// hides a progression you could otherwise reach. Options giving the same set as
+// one already offered are hidden (the current one always stays).
+// Returns { rhythm, palette }: the set of hidden values for each.
+const SETTING_VALUES = { rhythm: RATES, palette: PALETTES };
 // The chords and where each one changes. A chord repeated across bars counts once,
 // so "Am for two bars" and "Am, Am" are the same progression.
 const progressionSig = (h) => h.segments
   .filter((s, i, all) => i === 0 || all[i - 1].chord.id !== s.chord.id)
   .map((s) => `${s.start.toFixed(2)}:${s.chord.id}`).join('|');
+// Every progression a harmony offers, in any order
+const ideasSig = (h) => (h.alternatives?.length ? h.alternatives : [h.segments])
+  .map((segments) => progressionSig({ segments })).sort().join('||');
 
 function settingsWithoutChoice() {
   const notes = analysisNotes(), key = state.keys[state.keyIdx], base = harmonyOptions();
   const out = {};
   for (const [setting, values] of Object.entries(SETTING_VALUES)) {
     const sigs = new Map(values.map((v) => [v, v === state[setting]
-      ? progressionSig(state.harmony)
-      : progressionSig(harmonize(notes, key, { ...base, [setting]: v, ideas: 1 }))]));
+      ? ideasSig(state.harmony)
+      : ideasSig(harmonize(notes, key, { ...base, [setting]: v }))]));
     const offered = new Set([sigs.get(state[setting])]);
     out[setting] = new Set();
     for (const v of values) {
@@ -1622,12 +1632,15 @@ function scheduleClip(clip, clipStart, t0, start, end, dest) {
 // count-in already covers the first bar).
 function schedulePass(t0, a, b, buses, clickFrom = a) {
   const take = state.take;
-  // Voiced as a whole, so each chord's notes move as little as possible from the last.
-  const segs = resolvedSegments();
-  const voices = voiceLead(segs.map((s) => s.chord), segs.map((s) => s.bass));
-  segs.forEach((s, i) => {
-    if (s.end > a && s.start < b) synth.chord(voices[i], t0 + Math.max(0, s.start - a), Math.min(s.end, b) - Math.max(s.start, a), 1, buses.backing);
-  });
+  // The chords, in the chosen playing style, queued and voiced a moment ahead
+  // (see flushChords): a long take on the beat or in eighths is a lot of notes.
+  for (const ev of backingEvents()) {
+    let { t, dur } = ev;
+    if (t >= b || t + dur <= a + 0.05) continue;
+    if (t < a) { dur -= a - t; t = a; } // already sounding where this pass starts
+    chordQueue.push({ when: t0 + (t - a), ev: { ...ev, t, dur: Math.min(dur, b - t + 0.02) }, dest: buses.backing });
+  }
+  chordQueue.sort((x, y) => x.when - y.when);
   scheduleClip(voiceClip(take), 0, t0, a, b, buses.take);
   for (const l of take.layers) {
     if (kindOf(l) === 'rhythm' && l.sound === 'kit') {
@@ -1660,6 +1673,7 @@ function countInBar(start) {
 function startPlayback({ countIn = false } = {}) {
   if (!state.take) return;
   stopPlayback();
+  chordQueue = [];
   const take = state.take;
   const ctx = synth.begin();
   const range = state.trimming ?? takeRange();
@@ -1702,6 +1716,7 @@ function startPlayback({ countIn = false } = {}) {
       start = count.from;
     }
     schedulePass(t0, start, end, buses, clickFrom);
+    flushChords();
   }
   state.playing = {
     t0, start, end, viewStart: range.start, viewEnd: end, raf: 0, seg: -1, buses, count, queued: false,
@@ -1730,13 +1745,15 @@ function nowPlaying(playing) {
   } catch { /* unsupported */ }
 }
 
-for (const [action, run] of [['play', () => startPlayback()], ['pause', () => stopPlayback()], ['stop', () => stopPlayback()]]) {
+const playFromLockScreen = () => { if (!rec && !layerRec && !starting) startPlayback(); };
+for (const [action, run] of [['play', playFromLockScreen], ['pause', () => stopPlayback()], ['stop', () => stopPlayback()]]) {
   try { navigator.mediaSession?.setActionHandler(action, run); } catch { /* unsupported */ }
 }
 
 function tick() {
   const p = state.playing;
   if (!p) return;
+  flushChords();
   let t = p.start + (synth.ctx.currentTime - p.t0);
   // Count-in: a big number counting down to the bar line where the layer starts
   const counting = p.count && t < p.count.land;
@@ -1792,6 +1809,7 @@ function stopPlayback() {
   if (!state.playing) return;
   cancelAnimationFrame(state.playing.raf);
   state.playing = null;
+  chordQueue = [];
   synth.stop();
   nowPlaying(false);
   $('#playBtn').classList.remove('playing');
@@ -1803,7 +1821,56 @@ function stopPlayback() {
 function audition(chord) {
   stopPlayback();
   const ctx = synth.begin();
-  synth.chord(voicing(chord), ctx.currentTime + 0.02, 1.3, 0.9);
+  const evs = chordEvents([{ start: 0, end: 1.3 }], [voicing(chord)], { beat: 0.5, downbeat: 0, meter: '4/4' }, 'held');
+  for (const e of evs) playNote(synth, chordSound(), e, ctx.currentTime + 0.02 + e.t, synth.out, 0.9);
+}
+
+/* ---------- chord sound and playing style ---------- */
+
+const pref = (k, fallback) => { try { return localStorage.getItem(k) ?? fallback; } catch { return fallback; } };
+// Takes saved before there was a choice keep the original pad, held.
+const chordSound = () => state.take?.mix.backing.sound ?? 'pad';
+const chordStyle = () => state.take?.mix.backing.style ?? 'held';
+
+// The beat the styles follow: the take's grid, or a steady 120 bpm from the first chord.
+function beatGrid(segs) {
+  const t = state.take.tempo;
+  return t ? { beat: t.beat, downbeat: t.downbeat, meter: t.meter } : { beat: 0.5, downbeat: segs[0]?.start ?? 0, meter: '4/4' };
+}
+
+// Every note of the backing chords, on the take's timeline. Voiced as a whole, so
+// each chord's notes move as little as possible from the last.
+function backingEvents() {
+  const segs = resolvedSegments();
+  const voices = voiceLead(segs.map((s) => s.chord), segs.map((s) => s.bass));
+  return chordEvents(segs, voices, beatGrid(segs), chordStyle());
+}
+
+let chordQueue = [];
+// Voices the queued chord notes due in the next moment.
+function flushChords() {
+  if (!synth.ctx || !chordQueue.length) return;
+  const now = synth.ctx.currentTime, sound = chordSound();
+  while (chordQueue.length && chordQueue[0].when < now + 0.6) {
+    const { when, ev, dest } = chordQueue.shift();
+    if (when + ev.dur > now) playNote(synth, sound, ev, Math.max(when, now), dest);
+  }
+}
+
+// After picking a sound or style: hear it. Restarts playback if it's running,
+// otherwise plays the first couple of seconds of the progression.
+function previewBacking() {
+  if (layerRec) return;
+  if (state.playing) { startPlayback(); return; }
+  const evs = backingEvents();
+  if (!evs.length) return;
+  const ctx = synth.begin();
+  const bus = synth.bus(busLevel('backing', { ...track('backing'), on: true }));
+  const from = evs[0].t, until = from + 2.8, sound = chordSound();
+  for (const e of evs) {
+    if (e.t >= until) break;
+    playNote(synth, sound, { ...e, dur: Math.min(e.dur, until - e.t) }, ctx.currentTime + 0.05 + (e.t - from), bus);
+  }
 }
 
 function setLoop(on) {
@@ -2041,7 +2108,7 @@ function chromaBlocks(l) {
   return l.blocks;
 }
 
-const defaultMix = () => ({ take: { on: true, vol: 1 }, backing: { on: true, vol: 0.55 }, guide: { on: false, vol: 0.7 }, click: { vol: 0.4 } });
+const defaultMix = () => ({ take: { on: true, vol: 1 }, backing: { on: true, vol: 0.55, sound: pref('alchemy.chordSound', 'pad'), style: pref('alchemy.chordStyle', 'held') }, guide: { on: false, vol: 0.7 }, click: { vol: 0.4 } });
 
 // A track of the mix: 'take', 'backing', 'guide', 'click' or a layer id.
 // A quiet take can only be lifted so far before the room's hiss gets loud, so it
@@ -2090,6 +2157,12 @@ function layerCountIn() {
   try { return localStorage.getItem('alchemy.layerCountIn') !== '0'; } catch { return true; }
 }
 
+const backingLabel = () => `${soundOf(chordSound()).name} · ${styleOf(chordStyle()).name}`;
+const optRow = (act, label, items, current) => `
+  <div class="opt-label">${label}</div>
+  <div class="opt-row" role="radiogroup" aria-label="Chord ${label.toLowerCase()}">${items.map((it) =>
+    `<button class="chip-sm ${it.id === current ? 'on' : ''}" data-act="${act}" data-v="${it.id}" role="radio" aria-checked="${it.id === current}">${it.name}</button>`).join('')}</div>`;
+
 function openTracksSheet() {
   const take = state.take;
   const check = '<span class="chk"></span>';
@@ -2136,7 +2209,11 @@ function openTracksSheet() {
       ${row('take', 'take', 'Your take', `Melody · ${fmtTime(take.duration)}`)}
       ${take.layers.map(layerRow).join('')}
       <div class="track-group">Backing</div>
-      ${row('backing', 'backing', 'Chords', 'The progression')}
+      ${row('backing', 'backing', 'Chords', backingLabel(), `
+      <div class="track-opts sound-opts">
+        ${optRow('sound', 'Sound', SOUNDS, chordSound())}
+        ${optRow('style', 'Style', STYLES, chordStyle())}
+      </div>`)}
       ${row('guide', 'guide', 'Guide melody', 'Your notes, played clean')}
       ${take.tempo ? row('click', 'click', 'Click', `${Math.round(take.tempo.bpm)} bpm`) : ''}
     </div>
@@ -2166,6 +2243,19 @@ function openTracksSheet() {
     const id = b.closest('.track').dataset.track;
     const layer = take.layers.find((l) => l.id === id);
     const act = b.dataset.act;
+    if (act === 'sound' || act === 'style') {
+      take.mix.backing = { ...take.mix.backing, [act]: b.dataset.v };
+      try { localStorage.setItem(act === 'sound' ? 'alchemy.chordSound' : 'alchemy.chordStyle', b.dataset.v); } catch { /* storage unavailable */ }
+      markDirty();
+      b.parentElement.querySelectorAll('.chip-sm').forEach((c) => {
+        c.classList.toggle('on', c === b);
+        c.setAttribute('aria-checked', String(c === b));
+      });
+      b.closest('.track').querySelector('.track-name span').textContent = backingLabel();
+      previewBacking();
+      haptic();
+      return;
+    }
     if (act === 'mute') {
       const on = !track(id).on;
       if (id === 'click') setMetronome(on);
@@ -2823,28 +2913,26 @@ async function shareChart() {
 // as a MIDI file, laid on the take's beat grid so bars line up in a DAW.
 async function shareMidi() {
   const take = state.take, key = state.keys[state.keyIdx];
-  const tempo = take.tempo ?? { bpm: 120, beat: 0.5, downbeat: 0, meter: '4/4' };
+  const tempo = take.tempo ?? { bpm: 120, ...beatGrid(resolvedSegments()) };
   const { start, end } = takeRange();
   const bar = tempo.beat * barBeats(tempo.meter);
   // Start the file on the bar line at or before the first sound.
   const origin = tempo.downbeat + Math.floor((start - tempo.downbeat) / bar + 1e-6) * bar;
   const pulses = (t) => (t - origin) / tempo.beat;
-  const segs = resolvedSegments();
-  const voices = voiceLead(segs.map((s) => s.chord), segs.map((s) => s.bass));
   const melody = analysisNotes()
     .filter((n) => n.end > start && n.start < end)
     .map((n) => ({ midi: n.midi, t: pulses(n.start), dur: (n.end - n.start) / tempo.beat, vel: 100 }));
+  // The chords as they play back: the same style and voicing
   const chords = [], bass = [];
-  segs.forEach((s, i) => {
-    const t = pulses(s.start), dur = (s.end - s.start) / tempo.beat;
-    voices[i].slice(1).forEach((m) => chords.push({ midi: m, t, dur, vel: 70 }));
-    bass.push({ midi: voices[i][0], t, dur, vel: 85 });
-  });
+  for (const e of backingEvents()) {
+    const note = { midi: e.midi, t: pulses(e.t), dur: e.dur / tempo.beat, vel: Math.max(1, Math.round((e.role === 'bass' ? 85 : 70) * e.vel)) };
+    (e.role === 'bass' ? bass : chords).push(note);
+  }
   const blob = midiFile({
     bpm: tempo.bpm, meter: tempo.meter ?? '4/4', key,
     tracks: [
       { name: 'Melody', channel: 0, program: 0, notes: melody },
-      { name: 'Chords', channel: 1, program: 4, notes: chords },
+      { name: 'Chords', channel: 1, program: soundOf(chordSound()).gm, notes: chords },
       { name: 'Bass', channel: 2, program: 33, notes: bass },
     ],
   });

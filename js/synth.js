@@ -1,4 +1,5 @@
-// Small Web Audio synth: warm pad for chords, soft lead for melody, recorded voice playback.
+// Small Web Audio synth: the output chain, soft lead for the guide melody, clicks,
+// drums and recorded-audio playback. Chord sounds live in instruments.js.
 
 import { midiToFreq } from './pitch.js';
 
@@ -87,6 +88,9 @@ export class Synth {
     limiter.release.value = 0.2;
     limiter.connect(ctx.destination);
     this.master = ctx.createGain();
+    // A little headroom: a levelled voice peaks at 0.8 and the chords sit under
+    // it, so together they only brush the limiter instead of overshooting it.
+    this.master.gain.value = 0.85;
     this.master.connect(limiter);
     const verb = ctx.createConvolver();
     verb.buffer = makeImpulse(ctx);
@@ -128,38 +132,6 @@ export class Synth {
   _track(src) {
     this.sources.add(src);
     src.onended = () => this.sources.delete(src);
-  }
-
-  _voice(midi, t, dur, gain, type, cutoff, detunes, dest = this.out) {
-    const ctx = this.ctx;
-    const env = ctx.createGain();
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.value = cutoff;
-    filter.Q.value = 0.6;
-    filter.connect(env).connect(dest);
-
-    env.gain.setValueAtTime(0, t);
-    env.gain.linearRampToValueAtTime(gain, t + 0.06);
-    env.gain.setTargetAtTime(gain * 0.7, t + 0.06, 0.5);
-    env.gain.setTargetAtTime(0, t + dur, 0.15);
-
-    for (const d of detunes) {
-      const osc = ctx.createOscillator();
-      osc.type = type;
-      osc.frequency.value = midiToFreq(midi);
-      osc.detune.value = d;
-      osc.connect(filter);
-      osc.start(t);
-      osc.stop(t + dur + 1);
-      this._track(osc);
-    }
-  }
-
-  chord(midis, t, dur, level = 0.8, dest = this.out) {
-    const [bass, ...upper] = midis;
-    this._voice(bass, t, dur, 0.55 * level, 'triangle', 900, [0], dest);
-    for (const m of upper) this._voice(m, t, dur, (0.18 * level * 4) / Math.max(3, upper.length), 'sawtooth', 1500, [-7, 7], dest);
   }
 
   lead(midi, t, dur, dest = this.out) {

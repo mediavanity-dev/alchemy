@@ -24,7 +24,7 @@ const FRAMES = [
   ['harmony', 'Hum a melody.<br><em>Get the chords.</em>', 'Alchemy finds the key and a progression that fits.'],
   ['capture', 'Sing, hum<br>or <em>play anything</em>', 'Your pitch draws live as you record.'],
   ['alternatives', 'Tap a chord.<br><em>Hear what else fits.</em>', 'Ranked alternatives for every bar.'],
-  ['tracks', 'Build it up<br><em>layer by layer</em>', 'Add voices, instruments and beats over a count-in.'],
+  ['tracks', 'Build it up<br><em>layer by layer</em>', 'Pick a chord sound and style, and add your own layers.'],
   ['share', 'Take it to<br><em>your DAW</em>', 'Export melody, chords and bass as a MIDI file.'],
   ['library', 'Never lose<br><em>an idea</em>', 'Every take stays on your iPhone. No account needed.'],
 ];

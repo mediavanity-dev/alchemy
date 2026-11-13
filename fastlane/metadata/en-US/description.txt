@@ -13,7 +13,12 @@ GET A CHORD PROGRESSION
 • Suggests chords that fit your melody and move like a real song
 • Choose triads, extended chords (7ths, sus, add9) or chromatic colour with borrowed chords
 • Change chords every 2 bars, every bar, half bar or beat
-• Tap any chord to hear ranked alternatives, or ask for another idea
+• Switch between several progressions that fit, in the same key
+• Tap any chord to hear ranked alternatives
+
+HEAR IT YOUR WAY
+• Six chord sounds: warm pad, electric piano, guitar, organ, strings and marimba
+• Five playing styles: held, on the beat, strummed, arpeggio, or bass & chord
 
 BUILD A SONG
 • Record extra layers: harmonies, instruments or beats, with a count-in

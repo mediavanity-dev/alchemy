@@ -615,6 +615,12 @@ main { flex: 1; position: relative; overflow: hidden; }
 .track-mute svg { width: 20px; height: 20px; }
 .track-opts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 2px 36px; }
 .track-opts .icon-sm { margin-left: auto; }
+.sound-opts { display: block; margin-right: 6px; }
+.opt-label { margin: 8px 0 5px; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+.opt-row { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
+.opt-row::-webkit-scrollbar { display: none; }
+.chip-sm { flex: none; min-height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); font-size: 13px; white-space: nowrap; }
+.chip-sm.on { background: var(--gold); border-color: transparent; color: var(--gold-ink); font-weight: 600; }
 .kind-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 12px; border-radius: 999px; border: 1px dashed var(--line); font-size: 13px; color: var(--text); }
 .kind-chip svg { width: 15px; height: 15px; color: var(--gold); }
 .pass-pick { display: inline-flex; align-items: center; min-height: 34px; border-radius: 999px; border: 1px solid var(--gold); font-size: 13px; color: var(--text); font-variant-numeric: tabular-nums; }

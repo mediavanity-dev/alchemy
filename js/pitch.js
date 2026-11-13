@@ -18,7 +18,8 @@ export const midiToFreq = (m) => 440 * Math.pow(2, (m - 69) / 12);
 // (the singing, not the silences), so one stray pop can't keep the whole take
 // quiet. Very quiet takes are lifted a long way (the mic runs without the phone's
 // voice processing, so its raw level is low), but never so far that the room's
-// background hiss becomes loud. Brief transients above 0.8 are softly rounded off.
+// background hiss becomes loud. Anything the lift would push too high (a "p",
+// a bump of the phone) is turned down smoothly for that moment: see limitPeaks.
 export const LOUDNESS_TARGET = 0.2;
 
 export function normalizeLoudness(x, sr, target = LOUDNESS_TARGET) {
@@ -27,9 +28,27 @@ export function normalizeLoudness(x, sr, target = LOUDNESS_TARGET) {
   if (active < 1e-5) return x;
   const gain = Math.min(target / active, MAX_GAIN, Math.max(1, 0.01 / noiseFloor(levels)));
   for (let i = 0; i < x.length; i++) {
-    const v = x[i] * gain, a = Math.abs(v);
-    x[i] = a <= 0.8 ? v : Math.sign(v) * (0.8 + 0.2 * Math.tanh((a - 0.8) / 0.2));
+    x[i] *= gain;
   }
+  return limitPeaks(x, sr);
+}
+
+// A clean peak limiter: where the signal would pass `ceiling`, its gain dips just
+// enough, easing down over 5 ms before the peak and back up over 80 ms after, so
+// loud moments get quieter instead of distorting. The rest is untouched. In place.
+export function limitPeaks(x, sr, ceiling = 0.8) {
+  const g = new Float32Array(x.length);
+  let any = false;
+  for (let i = 0; i < x.length; i++) {
+    const a = Math.abs(x[i]);
+    g[i] = a > ceiling ? ceiling / a : 1;
+    if (g[i] < 1) any = true;
+  }
+  if (!any) return x;
+  const attack = 1 / Math.max(1, sr * 0.005), release = 1 / Math.max(1, sr * 0.08);
+  for (let i = x.length - 2; i >= 0; i--) g[i] = Math.min(g[i], g[i + 1] + attack);
+  for (let i = 1; i < x.length; i++) g[i] = Math.min(g[i], g[i - 1] + release);
+  for (let i = 0; i < x.length; i++) x[i] *= g[i];
   return x;
 }
 
