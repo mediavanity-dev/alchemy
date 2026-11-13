@@ -1,4 +1,4 @@
-import { extractTrack, segmentNotes, livePitch, normalizeLoudness, acRms, highpass } from './pitch.js';
+import { extractTrack, segmentNotes, livePitch, normalizeLoudness, acRms, highpass, liveLowCut } from './pitch.js';
 import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing, voiceLead, bassLine, detectTempo, beatsBetween, rankChords, METERS, barBeats, rateOf } from './theory.js';
 import { midiFile } from './midi.js';
 import { findOnsets, chooseGrid, anchorsFor, timeMap, warp, warpTrace } from './timing.js';
@@ -312,7 +312,11 @@ const liveGate = () => Math.max(2e-5, Math.min(0.003, rec.floor * 2.5));
 
 function onChunk(chunk, time) {
   if (!rec) return;
-  trackFloor(chunk);
+  // The live readout works on a copy with low rumble taken out; the take keeps
+  // the raw audio.
+  rec.lowCut ??= liveLowCut(rec.sr);
+  let heard = rec.lowCut(chunk);
+  trackFloor(heard);
   // Audio from before the take starts (the count-in) is set aside: it's used to
   // measure the device's delay, and never becomes part of the take.
   if (time != null && time < rec.startAt) {
@@ -320,12 +324,13 @@ function onChunk(chunk, time) {
     if (rec.pre && time >= rec.countT0 - 0.25) rec.pre.push({ time, data: chunk.subarray(0, Math.min(skip, chunk.length)) });
     if (skip >= chunk.length) return;
     chunk = chunk.subarray(skip);
+    heard = heard.subarray(skip);
   }
   rec.chunks.push(chunk);
   rec.length += chunk.length;
   const r = rec.recent;
-  r.copyWithin(0, chunk.length);
-  r.set(chunk, r.length - chunk.length);
+  r.copyWithin(0, heard.length);
+  r.set(heard, r.length - heard.length);
   const p = livePitch(r, rec.sr, liveGate());
   const t = rec.length / rec.sr;
   const midi = steadyPitch(p.midi, t);

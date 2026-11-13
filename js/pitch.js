@@ -3,6 +3,13 @@
 const TARGET_RATE = 12000;
 const MIN_FREQ = 38; // a bass guitar's low E is 41 Hz
 const MAX_FREQ = 2400; // flute, violin and whistling reach past 2 kHz
+// Pitch is judged with everything below this taken out, steeply (4th order). Room
+// rumble, mains hum, traffic, air conditioning and handling noise live down there,
+// and quiet singing was being measured against all of it. It sits just under a
+// low male voice (E2, 82 Hz). A bass's low E loses the level of its fundamental
+// but keeps its harmonics and its period, so its pitch still reads.
+const LOW_CUT = 75;
+const BUTTERWORTH_4 = [0.5412, 1.3066]; // the Q of each 2nd-order section
 
 export const freqToMidi = (f) => 69 + 12 * Math.log2(f / 440);
 export const midiToFreq = (m) => 440 * Math.pow(2, (m - 69) / 12);
@@ -41,10 +48,8 @@ export function noiseFloor(sortedLevels) {
 
 // Removes DC offset and sub-audio rumble (handling noise, wind, desk thumps) below
 // about 25 Hz, which would otherwise swamp the level of a quiet take. In place.
-export function highpass(x, sr, cutoff = 25) {
-  const w0 = (2 * Math.PI * cutoff) / sr;
-  const cos = Math.cos(w0), alpha = Math.sin(w0) / (2 * Math.SQRT1_2), a0 = 1 + alpha;
-  const b0 = (1 + cos) / 2 / a0, b1 = -(1 + cos) / a0, b2 = b0, a1 = (-2 * cos) / a0, a2 = (1 - alpha) / a0;
+export function highpass(x, sr, cutoff = 25, q = Math.SQRT1_2) {
+  const { b0, b1, b2, a1, a2 } = highpassCoefs(sr, cutoff, q);
   let x1 = x[0] || 0, x2 = x1, y1 = 0, y2 = 0;
   for (let i = 0; i < x.length; i++) {
     const v = x[i];
@@ -53,6 +58,39 @@ export function highpass(x, sr, cutoff = 25) {
     x[i] = y;
   }
   return x;
+}
+
+// The rumble cut for pitch analysis, in place.
+function lowCut(x, sr) {
+  for (const q of BUTTERWORTH_4) highpass(x, sr, LOW_CUT, q);
+  return x;
+}
+
+function highpassCoefs(sr, cutoff, q = Math.SQRT1_2) {
+  const w0 = (2 * Math.PI * cutoff) / sr;
+  const cos = Math.cos(w0), alpha = Math.sin(w0) / (2 * q), a0 = 1 + alpha;
+  return { b0: (1 + cos) / 2 / a0, b1: -(1 + cos) / a0, b2: (1 + cos) / 2 / a0, a1: (-2 * cos) / a0, a2: (1 - alpha) / a0 };
+}
+
+// The same rumble cut for live audio arriving block by block: the filter carries
+// on across blocks, so the joins don't click. Returns a filtered copy of each block.
+export function liveLowCut(sr) {
+  const sections = BUTTERWORTH_4.map((q) => ({ ...highpassCoefs(sr, LOW_CUT, q), x1: null, x2: 0, y1: 0, y2: 0 }));
+  return (block) => {
+    let out = block;
+    for (const f of sections) {
+      if (f.x1 == null) f.x1 = f.x2 = out[0] || 0;
+      const y = new Float32Array(out.length);
+      for (let i = 0; i < out.length; i++) {
+        const v = out[i];
+        const o = f.b0 * v + f.b1 * f.x1 + f.b2 * f.x2 - f.a1 * f.y1 - f.a2 * f.y2;
+        f.x2 = f.x1; f.x1 = v; f.y2 = f.y1; f.y1 = o;
+        y[i] = o;
+      }
+      out = y;
+    }
+    return out;
+  };
 }
 
 // Level with any DC offset taken out (some phone mics sit off centre).
@@ -184,7 +222,9 @@ export function livePitch(frame, sr, gate = 0.003) {
 }
 
 export async function extractTrack(samples, sr, onProgress) {
-  const { data, rate } = decimate(samples, sr);
+  const dec = decimate(samples, sr);
+  const rate = dec.rate;
+  const data = lowCut(dec.data === samples ? samples.slice() : dec.data, rate);
   const frameLen = Math.round(rate * 0.064);
   const hop = Math.round(rate * 0.0125);
   const shortLen = Math.round(rate * 0.02);
