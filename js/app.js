@@ -2064,7 +2064,8 @@ function locked(kind, value) {
   if (kind === 'sound') return !FREE_SOUNDS.includes(value);
   if (kind === 'style') return !FREE_STYLES.includes(value);
   if (kind === 'palette') return value === 'chromatic';
-  return true;
+  // Everything else (chord rate, progressions, mode…) is free.
+  return false;
 }
 
 function setPro(on) {
