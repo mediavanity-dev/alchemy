@@ -1,4 +1,4 @@
-import { extractTrack, segmentNotes, livePitch, normalizeLoudness, acRms, highpass, liveLowCut } from './pitch.js';
+import { extractTrack, segmentNotes, livePitch, normalizeLoudness, acRms, highpass, liveLowCut, loudness, LOUDNESS_TARGET } from './pitch.js';
 import { detectKeys, harmonize, keyName, spell, pc, noteLabel, scalePcs, voicing, voiceLead, bassLine, detectTempo, beatsBetween, rankChords, METERS, barBeats, rateOf } from './theory.js';
 import { midiFile } from './midi.js';
 import { findOnsets, chooseGrid, anchorsFor, timeMap, warp, warpTrace } from './timing.js';
@@ -1642,7 +1642,7 @@ function startPlayback({ countIn = false } = {}) {
     // while it plays.
     for (const id of ['backing', 'take', 'guide', 'click', ...take.layers.map((l) => l.id)]) {
       const t = track(id);
-      buses[id] = synth.bus(t.on ? t.vol : 0);
+      buses[id] = synth.bus(busLevel(id, t));
     }
     loopStart = start;
     let clickFrom = start;
@@ -1973,6 +1973,18 @@ function chromaBlocks(l) {
 const defaultMix = () => ({ take: { on: true, vol: 1 }, backing: { on: true, vol: 0.45 }, guide: { on: false, vol: 0.7 }, click: { vol: 0.8 } });
 
 // A track of the mix: 'take', 'backing', 'guide', 'click' or a layer id.
+// A quiet take can only be lifted so far before the room's hiss gets loud, so it
+// may play back well under the usual level. The chords and guide melody follow
+// it down (never more than 12 dB), so they sit under the voice the same way
+// whatever the take's level. The mixer's sliders work on top of this.
+function busLevel(id, t) {
+  if (!t.on) return 0;
+  if (id !== 'backing' && id !== 'guide') return t.vol;
+  const take = state.take;
+  take.level ??= loudness(take.samples, take.sampleRate).active;
+  return t.vol * Math.max(0.25, Math.min(1, take.level / LOUDNESS_TARGET));
+}
+
 function track(id) {
   const take = state.take;
   if (id === 'click') return { on: state.metronome, vol: take.mix.click.vol };
@@ -1995,7 +2007,7 @@ function setTrack(id, patch) {
   const b = state.playing?.buses?.[id];
   if (b) {
     const t = track(id);
-    b.gain.setTargetAtTime(t.on ? t.vol : 0, synth.ctx.currentTime, 0.03);
+    b.gain.setTargetAtTime(busLevel(id, t), synth.ctx.currentTime, 0.03);
   }
   if (id !== 'click') markDirty();
 }

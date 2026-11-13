@@ -19,15 +19,11 @@ export const midiToFreq = (m) => 440 * Math.pow(2, (m - 69) / 12);
 // quiet. Very quiet takes are lifted a long way (the mic runs without the phone's
 // voice processing, so its raw level is low), but never so far that the room's
 // background hiss becomes loud. Brief transients above 0.8 are softly rounded off.
-export function normalizeLoudness(x, sr, target = 0.2) {
+export const LOUDNESS_TARGET = 0.2;
+
+export function normalizeLoudness(x, sr, target = LOUDNESS_TARGET) {
   highpass(x, sr);
-  const win = Math.max(1, Math.round(sr * 0.05));
-  const levels = [];
-  for (let i = 0; i + win <= x.length; i += win) levels.push(rmsOf(x.subarray(i, i + win)));
-  if (!levels.length) return x;
-  levels.sort((a, b) => a - b);
-  const loud = levels.slice(Math.floor(levels.length * 0.7));
-  const active = Math.sqrt(loud.reduce((a, v) => a + v * v, 0) / loud.length);
+  const { active, levels } = loudness(x, sr);
   if (active < 1e-5) return x;
   const gain = Math.min(target / active, MAX_GAIN, Math.max(1, 0.01 / noiseFloor(levels)));
   for (let i = 0; i < x.length; i++) {
@@ -38,6 +34,19 @@ export function normalizeLoudness(x, sr, target = 0.2) {
 }
 
 const MAX_GAIN = 1000; // 60 dB
+
+// How loud a recording is where it's sounding: the level of its loudest 30%, in
+// 50 ms windows, so silences between phrases don't count. `levels` is every
+// window's level, sorted.
+export function loudness(x, sr) {
+  const win = Math.max(1, Math.round(sr * 0.05));
+  const levels = [];
+  for (let i = 0; i + win <= x.length; i += win) levels.push(rmsOf(x.subarray(i, i + win)));
+  if (!levels.length) return { active: 0, levels };
+  levels.sort((a, b) => a - b);
+  const loud = levels.slice(Math.floor(levels.length * 0.7));
+  return { active: Math.sqrt(loud.reduce((a, v) => a + v * v, 0) / loud.length), levels };
+}
 
 // The room's background level: the quiet end of a take's short-window loudness
 // (sorted ascending). Frames of pure digital silence don't count.
