@@ -538,43 +538,31 @@ const LOOPS = {
     [[9, 'min', 'm7'], [5, 'maj', 'maj7'], [0, 'maj', 'maj7'], [7, 'maj', 'dom7']], // vi IV I V
     [[0, 'maj', 'maj7'], [9, 'min', 'm7'], [5, 'maj', 'maj7'], [7, 'maj', 'dom7']], // I vi IV V
     [[0, 'maj', 'maj7'], [5, 'maj', 'maj7'], [9, 'min', 'm7'], [7, 'maj', 'dom7']], // I IV vi V
-    // Fallbacks, for when a short beat cuts the loops above down to the same chords
-    [[0, 'maj', 'maj7'], [2, 'min', 'm7'], [5, 'maj', 'maj7'], [7, 'maj', 'dom7']], // I ii IV V
-    [[5, 'maj', 'maj7'], [7, 'maj', 'dom7'], [0, 'maj', 'maj7'], [9, 'min', 'm7']], // IV V I vi
-    [[0, 'maj', 'maj7'], [4, 'min', 'm7'], [5, 'maj', 'maj7'], [7, 'maj', 'dom7']], // I iii IV V
   ],
   minor: [
     [[0, 'min', 'm7'], [8, 'maj', 'maj7'], [3, 'maj', 'maj7'], [10, 'maj', 'maj']], // i VI III VII
     [[0, 'min', 'm7'], [10, 'maj', 'maj'], [8, 'maj', 'maj7'], [10, 'maj', 'maj']], // i VII VI VII
     [[0, 'min', 'm7'], [5, 'min', 'm7'], [0, 'min', 'm7'], [7, 'maj', 'dom7']], // i iv i V
     [[0, 'min', 'm7'], [5, 'min', 'm7'], [10, 'maj', 'maj'], [3, 'maj', 'maj7']], // i iv VII III
-    [[0, 'min', 'm7'], [3, 'maj', 'maj7'], [10, 'maj', 'maj'], [8, 'maj', 'maj7']], // i III VII VI
-    [[8, 'maj', 'maj7'], [10, 'maj', 'maj'], [0, 'min', 'm7'], [0, 'min', 'm7']], // VI VII i i
-    [[0, 'min', 'm7'], [7, 'min', 'm7'], [8, 'maj', 'maj7'], [5, 'min', 'm7']], // i v VI iv
   ],
   dorian: [
     [[0, 'min', 'm7'], [5, 'maj', 'dom7'], [0, 'min', 'm7'], [5, 'maj', 'dom7']], // i IV i IV
     [[0, 'min', 'm7'], [10, 'maj', 'maj'], [5, 'maj', 'dom7'], [0, 'min', 'm7']], // i VII IV i
     [[0, 'min', 'm7'], [3, 'maj', 'maj7'], [5, 'maj', 'dom7'], [0, 'min', 'm7']], // i III IV i
     [[0, 'min', 'm7'], [2, 'min', 'm7'], [5, 'maj', 'dom7'], [0, 'min', 'm7']], // i ii IV i
-    [[5, 'maj', 'dom7'], [0, 'min', 'm7'], [10, 'maj', 'maj'], [0, 'min', 'm7']], // IV i VII i
-    [[3, 'maj', 'maj7'], [5, 'maj', 'dom7'], [0, 'min', 'm7'], [0, 'min', 'm7']], // III IV i i
   ],
   mixolydian: [
     [[0, 'maj', 'dom7'], [10, 'maj', 'maj'], [5, 'maj', 'maj7'], [0, 'maj', 'dom7']], // I VII IV I
     [[0, 'maj', 'dom7'], [10, 'maj', 'maj'], [0, 'maj', 'dom7'], [10, 'maj', 'maj']], // I VII I VII
     [[0, 'maj', 'dom7'], [7, 'min', 'm7'], [5, 'maj', 'maj7'], [0, 'maj', 'dom7']], // I v IV I
     [[0, 'maj', 'dom7'], [5, 'maj', 'maj7'], [10, 'maj', 'maj'], [5, 'maj', 'maj7']], // I IV VII IV
-    [[10, 'maj', 'maj'], [0, 'maj', 'dom7'], [5, 'maj', 'maj7'], [0, 'maj', 'dom7']], // VII I IV I
-    [[5, 'maj', 'maj7'], [0, 'maj', 'dom7'], [7, 'min', 'm7'], [0, 'maj', 'dom7']], // IV I v I
   ],
 };
 
 // Chords for a beat on its own (beatbox, say): familiar loops in the key, one chord
-// per window of the chosen rate. Up to four loops are offered, each using a
-// different set of chords over the beat's length (a short beat only has room for
-// a loop's first chord or two, so several can come out the same).
-const MAX_LOOPS = 4;
+// per window of the chosen rate. Each loop is one of the progressions on offer,
+// unless it comes out with the same chords as one already offered (a short beat
+// only has room for a loop's first chord or two): then it's left out.
 function loopHarmony(all, vocab, key, rhythm, tempo, [t0, t1]) {
   const rich = vocab.some((c) => c.color != null);
   const find = (deg, q) => vocab.find((c) => c.deg === deg && c.quality === q && !c.chromatic)
@@ -589,7 +577,6 @@ function loopHarmony(all, vocab, key, rhythm, tempo, [t0, t1]) {
   const alternatives = [];
   const sets = new Set();
   for (const loop of LOOPS[key.mode] ?? LOOPS[minorish ? 'minor' : 'major']) {
-    if (alternatives.length >= MAX_LOOPS) break;
     const chords = loop.map(([deg, tri, ext]) => (rich && find(deg, ext)) || find(deg, tri));
     if (chords.some((c) => !c)) continue;
     const set = [...new Set(wins.map((w, i) => chords[i % chords.length].symbol))].sort().join(' ');
