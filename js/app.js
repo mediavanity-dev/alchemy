@@ -256,7 +256,7 @@ function startCountIn() {
   // In headphones the clicks are gentler, and keep time through the whole take
   // (nothing leaks into the mic). On the speaker they stop on the 1.
   const keepTime = rec.mic.headphones;
-  synth.countIn(t0, beat, n, keepTime ? HEADPHONE_CLICK : 1);
+  synth.countIn(t0, beat, n, countLevel(keepTime));
   // Align the take with when the singer actually hears the beat, plus the mic's own
   // delay: as reported, plus what the last count-in showed the report misses. The
   // count-in itself is measured when the take stops (see measureRoundTrip).
@@ -570,11 +570,21 @@ function measureRoundTrip(r) {
 /* ---------- count-in ---------- */
 
 function loadCountIn() {
-  const fallback = { on: false, bpm: 100, meter: '4/4' };
+  const fallback = { on: false, bpm: 100, meter: '4/4', vol: 1 };
   try {
     const saved = { ...fallback, ...JSON.parse(localStorage.getItem('alchemy.countIn') ?? '{}') };
     return METERS.includes(saved.meter) ? saved : { ...saved, meter: '4/4' };
   } catch { return fallback; }
+}
+
+// The count-in's level (and the click through a take in headphones): the volume
+// set in the Count-in sheet, gentler again in headphones.
+const countLevel = (headphones) => (state.countIn.vol ?? 1) * (headphones ? HEADPHONE_CLICK : 1);
+
+async function previewCountIn(beats) {
+  const ctx = synth.ensure();
+  const level = countLevel(await headphonesIn());
+  synth.countIn(ctx.currentTime + 0.05, 60 / state.countIn.bpm, beats ?? barBeats(state.countIn.meter), level);
 }
 
 function saveCountIn() {
@@ -614,9 +624,12 @@ function openCountInSheet() {
       <button class="btn" id="countPreview">Preview</button>
     </div>
     ${meterSeg(meter)}
+    <label class="vol-row">Click volume<input type="range" id="countVol" min="0.05" max="1" step="0.05" value="${state.countIn.vol ?? 1}"></label>
   </div>`);
 
   const body = $('#sheetBody .count-sheet');
+  $('#countVol').addEventListener('input', (e) => { state.countIn = { ...state.countIn, vol: +e.target.value }; saveCountIn(); });
+  $('#countVol').addEventListener('change', () => previewCountIn(1));
   const setBpm = (v) => {
     state.countIn = { ...state.countIn, on: true, bpm: Math.max(40, Math.min(240, Math.round(v))) };
     saveCountIn();
@@ -635,8 +648,7 @@ function openCountInSheet() {
       saveCountIn();
       openCountInSheet();
     } else if (b.id === 'countPreview') {
-      const ctx = synth.ensure();
-      synth.countIn(ctx.currentTime + 0.05, 60 / state.countIn.bpm, barBeats(state.countIn.meter));
+      previewCountIn();
     } else return;
     haptic();
   });
@@ -1020,8 +1032,9 @@ function reanalyze() {
 // Re-fit the beat grid to the current notes, keeping a tempo the user set by hand.
 function retempo() {
   const take = state.take;
-  // A count-in tempo is ground truth for the take; never re-detect it.
-  if (take.tempo?.source === 'countin') return;
+  // A count-in tempo is ground truth for the take; never re-detect it. Nor a grid
+  // the trim was snapped to.
+  if (take.tempo?.source === 'countin' || take.trim?.snap) return;
   const manual = take.tempo?.manual ? take.tempo.bpm : null;
   const meter = take.tempo?.meter;
   // Drum hits are good evidence for where the beat is.
@@ -1042,6 +1055,16 @@ function resolvedSegments() {
   return segs.map((s, i) => ({ ...s, bass: bass[i] }));
 }
 
+// When the take's sound first rises above the room, worked out once per recording.
+function firstSound() {
+  const take = state.take;
+  if (take.soundStartFor !== take.samples) {
+    take.soundStart = soundStart(take.samples, take.sampleRate);
+    take.soundStartFor = take.samples;
+  }
+  return take.soundStart;
+}
+
 // "G/B" when the bass isn't the root.
 function chordLabel(s, key = state.keys[state.keyIdx]) {
   if (s.bass == null || s.bass === s.chord.root) return s.chord.symbol;
@@ -1052,6 +1075,7 @@ function chordLabel(s, key = state.keys[state.keyIdx]) {
 function takeRange() {
   const n = analysisNotes();
   const { trim, notes, layers } = state.take;
+  if (trim.snap) return { start: trim.start, end: trim.end };
   const lastBase = notes.reduce((m, x) => Math.max(m, x.end), 0);
   let end = Math.min(trim.end, lastBase + 0.3);
   for (const x of n) end = Math.max(end, x.end + 0.3);
@@ -1059,12 +1083,7 @@ function takeRange() {
   const beat = beatSpan();
   if (beat) end = Math.max(end, beat[1]);
   // From the first sound, even if the first notes were too soft to be picked out
-  const take = state.take;
-  if (take.soundStartFor !== take.samples) {
-    take.soundStart = soundStart(take.samples, take.sampleRate);
-    take.soundStartFor = take.samples;
-  }
-  const heard = take.soundStart >= trim.start ? take.soundStart : Infinity;
+  const heard = firstSound() >= trim.start ? firstSound() : Infinity;
   const first = Math.min(n[0]?.start ?? Infinity, beat?.[0] ?? Infinity, heard);
   return { start: Number.isFinite(first) ? Math.max(trim.start, first - 0.15) : trim.start, end };
 }
@@ -1189,7 +1208,7 @@ function drawRoll(playT = null) {
   const drag = editing?.drag;
   const play = state.playing;
   const { start, end } = trimming
-    ? { start: 0, end: take.duration }
+    ? { start: Math.min(0, trimming.start), end: Math.max(take.duration, trimming.end) }
     : layerRec && play ? { start: play.viewStart, end: play.viewEnd } : takeRange();
   const inView = (n) => n.end > start && n.start < end;
 
@@ -1234,6 +1253,19 @@ function drawRoll(playT = null) {
   if (!trimming) {
     g.fillStyle = cLane;
     for (const s of segs.slice(1)) g.fillRect(Math.round(x(s.start)), top, 1, rollH);
+  }
+
+  // The grid the trim edges snap to, bar lines stronger
+  if (trimming && snapUnit(trimSnap())) {
+    const unit = snapUnit(trimSnap()), g0 = take.tempo.downbeat;
+    const barLen = barBeats(take.tempo.meter) * take.tempo.beat;
+    g.fillStyle = cFaint;
+    for (let k = Math.ceil((start - g0) / unit); g0 + k * unit <= end; k++) {
+      const pos = (k * unit) / barLen;
+      g.globalAlpha = Math.abs(pos - Math.round(pos)) < 1e-3 ? 0.55 : 0.22;
+      g.fillRect(Math.round(x(g0 + k * unit)), top, 1, rollH);
+    }
+    g.globalAlpha = 1;
   }
 
   // Beat marks along the top edge while the metronome is on
@@ -1441,9 +1473,72 @@ $('#chordList').addEventListener('click', (e) => {
 
 /* ---------- trim ---------- */
 
+// Trim edges can snap to the take's beat grid (its count-in tempo, one set by
+// hand, or the one detected from the singing): to a bar, a beat or a fraction of
+// one. A snapped trim is played (and looped) exactly as set, so a loop goes round
+// in step and layers recorded over it line up.
+const SNAPS = { quarter: 0.25, half: 0.5, beat: 1 };
+const trimSnap = () => (state.take?.tempo ? pref('alchemy.trimSnap', 'beat') : 'off');
+
+function snapUnit(mode) {
+  const g = state.take.tempo;
+  if (!g || mode === 'off') return 0;
+  return mode === 'bar' ? barBeats(g.meter) * g.beat : g.beat * (SNAPS[mode] ?? 1);
+}
+
+// The grid line nearest t. An edge dragged to the start of the sound (or the end
+// of the recording) rounds outwards instead, so nothing sung is cut off: the
+// start may fall a little before the recording, the end a little after it.
+function snapTime(t, side, mode = trimSnap()) {
+  const unit = snapUnit(mode);
+  if (!unit) return t;
+  const take = state.take, g = take.tempo;
+  const k = (t - g.downbeat) / unit;
+  if (side === 'start') {
+    const first = firstSound();
+    if (t <= first + 0.02) return g.downbeat + Math.floor((first - g.downbeat) / unit + 1e-6) * unit;
+  } else if (t >= take.duration - 0.05) {
+    return g.downbeat + Math.ceil(k - 1e-6) * unit;
+  }
+  return g.downbeat + Math.round(k) * unit;
+}
+
+function snapTrimEdges() {
+  const tr = state.trimming, unit = snapUnit(trimSnap());
+  if (!unit) return;
+  tr.start = snapTime(tr.start, 'start');
+  tr.end = snapTime(tr.end, 'end');
+  if (tr.end - tr.start < unit - 1e-6) tr.end = tr.start + unit;
+}
+
+function renderTrimSnap() {
+  const has = !!state.take?.tempo;
+  $('#trimSnap').hidden = !has;
+  $('#trimHint').hidden = has;
+  const mode = trimSnap();
+  $('#trimSnap').querySelectorAll('button').forEach((b) => {
+    b.classList.toggle('active', b.dataset.snap === mode);
+    b.setAttribute('aria-pressed', String(b.dataset.snap === mode));
+  });
+}
+
+$('#trimSnap').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-snap]');
+  if (!b || !state.trimming) return;
+  try { localStorage.setItem('alchemy.trimSnap', b.dataset.snap); } catch { /* storage unavailable */ }
+  stopPlayback();
+  if (b.dataset.snap === 'off') Object.assign(state.trimming, { start: Math.max(0, state.trimming.start), end: Math.min(state.take.duration, state.trimming.end) });
+  else snapTrimEdges();
+  renderTrimSnap();
+  drawRoll();
+  haptic();
+});
+
 $('#trimBtn').addEventListener('click', () => {
   stopPlayback();
-  state.trimming = { ...state.take.trim, drag: null };
+  state.trimming = { start: state.take.trim.start, end: state.take.trim.end, drag: null };
+  snapTrimEdges();
+  renderTrimSnap();
   renderHarmony();
   haptic();
 });
@@ -1473,7 +1568,10 @@ $('#trimApply').addEventListener('click', async () => {
   // A beat keeps no notes of its own (see processAudio).
   take.notes = take.hits?.length ? [] : r.notes;
   take.offset = r.offset;
-  take.trim = { start, end };
+  const snap = trimSnap();
+  take.trim = snap === 'off' ? { start, end } : { start, end, snap };
+  // The grid the edges were snapped to stays put from now on.
+  if (snap !== 'off' && take.tempo.source !== 'countin') take.tempo = { ...take.tempo, manual: true };
   state.trimming = null;
   reanalyze();
   toast('Trimmed and re-harmonized');
@@ -1513,10 +1611,19 @@ roll.addEventListener('pointercancel', () => {
 
 function moveTrimHandle(t) {
   const tr = state.trimming;
-  if (tr.drag === 'start') tr.start = Math.min(t, tr.end - MIN_TRIM);
-  else tr.end = Math.max(t, tr.start + MIN_TRIM);
-  tr.start = Math.max(0, tr.start);
-  tr.end = Math.min(state.take.duration, tr.end);
+  const unit = snapUnit(trimSnap());
+  if (unit) {
+    const min = Math.max(unit, Math.ceil(MIN_TRIM / unit - 1e-6) * unit);
+    const prev = tr.drag === 'start' ? tr.start : tr.end;
+    if (tr.drag === 'start') tr.start = Math.min(snapTime(t, 'start'), tr.end - min);
+    else tr.end = Math.max(snapTime(t, 'end'), tr.start + min);
+    if ((tr.drag === 'start' ? tr.start : tr.end) !== prev) haptic(4);
+  } else {
+    if (tr.drag === 'start') tr.start = Math.min(t, tr.end - MIN_TRIM);
+    else tr.end = Math.max(t, tr.start + MIN_TRIM);
+    tr.start = Math.max(0, tr.start);
+    tr.end = Math.min(state.take.duration, tr.end);
+  }
   drawRoll();
 }
 
@@ -1785,7 +1892,9 @@ function startPlayback({ countIn = false } = {}) {
     // never a whole bar: the playhead waits at the first note until then.
     const grid = trustedTempo();
     const beatGrid = grid ?? (state.metronome ? take.tempo : null);
-    if (state.loop && (!layerRec || layerRec.loop) && grid) {
+    if (take.trim.snap) {
+      // Snapped to the grid already: played and looped exactly as trimmed.
+    } else if (state.loop && (!layerRec || layerRec.loop) && grid) {
       const bar = barBeats(grid.meter) * grid.beat;
       start = grid.downbeat + Math.floor((start - grid.downbeat) / bar + 0.02) * bar;
       end = start + Math.max(1, Math.ceil((end - start) / bar - 0.05)) * bar;
@@ -1802,7 +1911,7 @@ function startPlayback({ countIn = false } = {}) {
     let clickFrom = start;
     if (countIn) {
       count = countInBar(start);
-      const lead = synth.bus(layerRec?.mic.headphones ? HEADPHONE_CLICK : 1);
+      const lead = synth.bus(countLevel(layerRec?.mic.headphones));
       for (let k = 0; k < count.per; k++) synth.click(t0 + k * count.beat, k === 0, lead);
       clickFrom = count.land;
       start = count.from;
@@ -2675,25 +2784,52 @@ function setTempo(bpm, manual = true) {
   const take = state.take;
   bpm = Math.max(40, Math.min(240, Math.round(bpm * 2) / 2));
   const meter = take.tempo?.meter;
-  take.tempo = detectTempo(take.notes, manual ? bpm : null);
-  if (manual) take.tempo.manual = true;
-  if (meter) take.tempo.meter = meter;
+  const found = detectTempo(withHits(take.notes, take.hits), manual ? bpm : null);
+  // Too little to fit a grid to (a note or two): the beat runs from where it was.
+  take.tempo = found ?? (manual ? { bpm, beat: 60 / bpm, downbeat: take.tempo?.downbeat ?? firstSound(), meter: meter ?? '4/4' } : null);
+  if (manual && take.tempo) take.tempo.manual = true;
+  if (meter && take.tempo) take.tempo.meter = meter;
+  resnapTrim();
   markDirty();
   stopPlayback();
   regrid();
   renderHarmony();
 }
 
+// A trim snapped to the grid follows it when the tempo or bar length changes.
+function resnapTrim() {
+  const take = state.take, tr = take.trim;
+  if (!tr.snap) return;
+  if (!take.tempo) { take.trim = { start: Math.max(0, tr.start), end: Math.min(take.duration, tr.end) }; return; }
+  const start = snapTime(tr.start, 'start', tr.snap);
+  let end = snapTime(tr.end, 'end', tr.snap);
+  if (end <= start) end = start + snapUnit(tr.snap);
+  take.trim = { ...tr, start, end };
+}
+
 // Changes only where the bar lines and accents fall; the beat grid stays put.
 function setMeter(meter) {
   const take = state.take;
   take.tempo = { ...take.tempo, meter };
+  resnapTrim();
   markDirty();
   const wasPlaying = !!state.playing && !layerRec;
   stopPlayback();
   regrid();
   renderHarmony();
   if (wasPlaying && state.metronome) startPlayback();
+}
+
+// The metronome's volume, the same one as the Click track in Tracks: for playback
+// and for the click while recording a layer. Changes are heard straight away.
+const clickVolRow = () => `<label class="vol-row">Click volume<input type="range" id="clickVol" min="0.05" max="1" step="0.05" value="${state.take.mix.click.vol}"></label>`;
+function bindClickVol() {
+  $('#clickVol').addEventListener('input', (e) => setTrack('click', { vol: +e.target.value }));
+  $('#clickVol').addEventListener('change', () => {
+    if (state.playing && state.metronome) return;
+    const ctx = synth.ensure();
+    synth.countIn(ctx.currentTime + 0.05, 0.4, 1, state.take.mix.click.vol);
+  });
 }
 
 function openTempoSheet() {
@@ -2711,7 +2847,9 @@ function openTempoSheet() {
         <button data-click="off" class="${state.metronome ? '' : 'active'}">Click off</button>
         <button data-click="on" class="${state.metronome ? 'active' : ''}">Click on</button>
       </div>
+      ${clickVolRow()}
     </div>`);
+    bindClickVol();
     $('#sheetBody .tempo-sheet').addEventListener('click', (e) => {
       const b = e.target.closest('[data-click], [data-meter]');
       if (!b) return;
@@ -2739,10 +2877,12 @@ function openTempoSheet() {
       <button data-click="off" class="${state.metronome ? '' : 'active'}">Click off</button>
       <button data-click="on" class="${state.metronome ? 'active' : ''}">Click on</button>
     </div>
+    ${clickVolRow()}
     ${t.manual ? '<button class="text-btn tempo-reset" id="tempoReset">Back to detected tempo</button>' : ''}
     </div>`);
 
   const body = $('#sheetBody .tempo-sheet');
+  bindClickVol();
   body.addEventListener('click', (e) => {
     const b = e.target.closest('button');
     if (!b || b.id === 'tapTempo') return;

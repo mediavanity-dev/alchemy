@@ -335,6 +335,10 @@ main { flex: 1; position: relative; overflow: hidden; }
 .roll-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin: 4px -6px 0 2px; }
 .roll-info { font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .roll-actions { display: flex; gap: 2px; flex: none; }
+.trim-snap { flex: 1; min-width: 0; max-width: 250px; padding: 2px; border-radius: 10px; }
+.trim-snap button { min-height: 30px; padding: 0 2px; font-size: 12px; border-radius: 8px; }
+.vol-row { display: flex; align-items: center; gap: 12px; margin-top: 16px; font-size: 14px; color: var(--muted); }
+.vol-row input { flex: 1; accent-color: var(--gold); }
 .roll-left { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .tempo-btn {
   flex: none;

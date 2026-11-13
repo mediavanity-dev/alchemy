@@ -135,7 +135,14 @@
             </div>
           </div>
           <div class="roll-bar" id="trimBar" hidden>
-            <span class="roll-info">Drag the edges to trim</span>
+            <span class="roll-info" id="trimHint">Drag the edges to trim</span>
+            <div class="seg trim-snap" id="trimSnap" role="group" aria-label="Snap the edges to" hidden>
+              <button data-snap="off" aria-label="No snap">Off</button>
+              <button data-snap="quarter" aria-label="Quarter beat">¼</button>
+              <button data-snap="half" aria-label="Half beat">½</button>
+              <button data-snap="beat">Beat</button>
+              <button data-snap="bar">Bar</button>
+            </div>
             <div class="roll-actions">
               <button class="text-btn" id="trimCancel">Cancel</button>
               <button class="text-btn strong" id="trimApply">Apply</button>
