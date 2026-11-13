@@ -6,7 +6,7 @@ import { Synth } from './synth.js';
 import { tuneClip, targetFn } from './tune.js';
 import { analyze, classify, chromaOf, hitsOf, normalizePeak } from './sound.js';
 import * as store from './db.js';
-import { isNative, shareText, shareFile } from './native.js';
+import { isNative, shareText, shareFile, onOpenedFile } from './native.js';
 
 const $ = (sel) => document.querySelector(sel);
 const MAX_SECONDS = 45;
@@ -327,8 +327,25 @@ function onChunk(chunk, time) {
   r.copyWithin(0, chunk.length);
   r.set(chunk, r.length - chunk.length);
   const p = livePitch(r, rec.sr, liveGate());
-  rec.trace.push({ t: rec.length / rec.sr, midi: p.midi });
-  updateLive(p, liveGate() / 2.5);
+  const t = rec.length / rec.sr;
+  const midi = steadyPitch(p.midi, t);
+  rec.trace.push({ t, midi });
+  updateLive({ ...p, midi }, liveGate() / 2.5);
+}
+
+// Quiet input lets the odd stray reading through (noise, or a jump to the wrong
+// octave), which drew as a spike. A reading that starts a line, or leaps more than
+// a couple of semitones from it, is shown only once the next reading agrees.
+// That costs one block (about 20 ms) at the start of a real new note.
+function steadyPitch(midi, t) {
+  if (midi == null) { rec.cand = null; return null; }
+  const onLine = rec.lastMidi != null && t - rec.lastT < 0.15 && Math.abs(midi - rec.lastMidi) < 2.5;
+  const confirmed = rec.cand != null && Math.abs(midi - rec.cand) < 1;
+  if (!onLine && !confirmed) { rec.cand = midi; return null; }
+  rec.cand = null;
+  rec.lastMidi = midi;
+  rec.lastT = t;
+  return midi;
 }
 
 function updateLive(p, floor = 1e-4) {
@@ -613,10 +630,14 @@ $('#fileInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   e.target.value = '';
   if (!file) return;
+  await importAudio(await file.arrayBuffer(), file.name);
+});
+
+async function importAudio(data, fileName) {
   const ctx = synth.ensure();
   let buf;
   try {
-    buf = await ctx.decodeAudioData(await file.arrayBuffer());
+    buf = await ctx.decodeAudioData(data);
   } catch {
     toast("Couldn't read that audio file.");
     return;
@@ -628,8 +649,19 @@ $('#fileInput').addEventListener('change', async (e) => {
     for (let i = 0; i < len; i++) mono[i] += d[i] / buf.numberOfChannels;
   }
   if (buf.length > len) toast(`Using the first ${MAX_IMPORT_SECONDS} seconds.`);
-  await processAudio(mono, buf.sampleRate, file.name.replace(/\.[^.]+$/, ''));
-});
+  await processAudio(mono, buf.sampleRate, fileName.replace(/\.[^.]+$/, ''));
+}
+
+// In the iPhone app, audio shared to Alchemy (Voice Memos → Share → Alchemy) opens
+// the same way as Import audio.
+if (isNative) {
+  onOpenedFile(async (data, name) => {
+    if (rec || layerRec || starting) { toast('Finish recording first, then share the file again.'); return; }
+    stopPlayback();
+    showView('capture');
+    await importAudio(data, name);
+  }, () => toast("Couldn't open that file.")).catch(() => {});
+}
 
 // A short sung-style phrase in A minor, rendered with vibrato and a slightly flat tuning.
 function demoSamples(sr) {
@@ -1591,11 +1623,15 @@ function startPlayback({ countIn = false } = {}) {
   } else {
     // A loop over a trusted beat grid is rounded out to whole bars, so the groove
     // carries straight on across the seam.
+    // With a beat grid to follow (a count-in recording, or the metronome on),
+    // playback starts on the bar line before the first note, so the click's "one"
+    // is heard even when the singer came in a little after it.
     const grid = trustedTempo();
-    if (state.loop && (!layerRec || layerRec.loop) && grid) {
-      const bar = barBeats(grid.meter) * grid.beat;
-      start = grid.downbeat + Math.floor((start - grid.downbeat) / bar + 0.02) * bar;
-      end = start + Math.max(1, Math.ceil((end - start) / bar - 0.05)) * bar;
+    const barGrid = grid ?? (state.metronome ? take.tempo : null);
+    if (barGrid) {
+      const bar = barBeats(barGrid.meter) * barGrid.beat;
+      start = barGrid.downbeat + Math.floor((start - barGrid.downbeat) / bar + 0.02) * bar;
+      if (state.loop && (!layerRec || layerRec.loop) && grid) end = start + Math.max(1, Math.ceil((end - start) / bar - 0.05)) * bar;
     }
     // Every track gets its own gain stage, muted ones at zero, so the mix can change
     // while it plays.
@@ -1929,7 +1965,7 @@ function chromaBlocks(l) {
   return l.blocks;
 }
 
-const defaultMix = () => ({ take: { on: true, vol: 1 }, backing: { on: true, vol: 0.6 }, guide: { on: false, vol: 0.7 }, click: { vol: 0.8 } });
+const defaultMix = () => ({ take: { on: true, vol: 1 }, backing: { on: true, vol: 0.45 }, guide: { on: false, vol: 0.7 }, click: { vol: 0.8 } });
 
 // A track of the mix: 'take', 'backing', 'guide', 'click' or a layer id.
 function track(id) {
