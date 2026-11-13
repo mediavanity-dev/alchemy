@@ -1,0 +1,58 @@
+# Uploads the App Store listing (the text in fastlane/metadata and the
+# screenshots in fastlane/screenshots) to App Store Connect with fastlane
+# deliver. Doesn't upload a build or submit for review. Run it from the
+# Actions tab: "App Store listing" → Run workflow.
+#
+# Uses the same secrets as the TestFlight workflow: ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8.
+name: App Store listing
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_version:
+        description: Version whose listing to update
+        default: '1.0'
+        required: true
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+
+      - name: Install fastlane
+        run: gem install fastlane --no-document
+
+      - name: Write App Store Connect key
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/keys"
+          ruby -rjson -e 'puts({ key_id: ENV["ASC_KEY_ID"], issuer_id: ENV["ASC_ISSUER_ID"], key: ENV["ASC_KEY_P8"], in_house: false }.to_json)' > "$RUNNER_TEMP/keys/api_key.json"
+
+      - name: Upload listing
+        run: |
+          fastlane deliver \
+            --api_key_path "$RUNNER_TEMP/keys/api_key.json" \
+            --app_identifier com.mediavanity.alchemy \
+            --app_version "${{ inputs.app_version }}" \
+            --platform ios \
+            --metadata_path fastlane/metadata \
+            --screenshots_path fastlane/screenshots \
+            --overwrite_screenshots \
+            --skip_binary_upload \
+            --skip_app_version_update false \
+            --submit_for_review false \
+            --run_precheck_before_submit false \
+            --force
+
+      - name: Remove key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/keys"

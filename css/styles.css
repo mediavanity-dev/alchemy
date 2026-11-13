@@ -535,7 +535,7 @@ main { flex: 1; position: relative; overflow: hidden; }
 .alt-list { display: flex; flex-direction: column; gap: 8px; }
 .alt {
   display: grid;
-  grid-template-columns: 70px 1fr 54px;
+  grid-template-columns: 100px 1fr 54px; /* wide enough for "F♯m(add9)" */
   align-items: center;
   gap: 12px;
   min-height: 56px;
@@ -546,7 +546,7 @@ main { flex: 1; position: relative; overflow: hidden; }
   text-align: left;
 }
 .alt.active { border-color: var(--gold); box-shadow: inset 0 0 0 1px var(--gold); }
-.alt .sym { font-size: 18px; font-weight: 600; }
+.alt .sym { font-size: 18px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .alt .rn { font-family: var(--serif); font-style: italic; color: var(--muted); font-size: 14px; }
 .alt .fit { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
 .alt .fit i { display: block; height: 100%; border-radius: 3px; background: var(--gold); }

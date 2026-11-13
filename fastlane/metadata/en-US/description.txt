@@ -1,0 +1,32 @@
+Sing, hum or play a melody, and Alchemy finds the key it sits in and the chords that fit underneath it. It's the fastest way to turn the tune in your head into a song you can play.
+
+HUM IT, SEE IT
+• Your pitch draws live as you sing, on a scrolling note grid
+• Alchemy picks out every note, even through vibrato and slides
+• Works with your voice or any instrument: guitar, piano, violin, whistling
+
+FIND THE KEY
+• Detects major and minor keys, plus Dorian and Mixolydian modes
+• Shows how likely each key is, so you can try the alternatives
+
+GET A CHORD PROGRESSION
+• Suggests chords that fit your melody and move like a real song
+• Choose triads, extended chords (7ths, sus, add9) or chromatic colour with borrowed chords
+• Change chords every 2 bars, every bar, half bar or beat
+• Tap any chord to hear ranked alternatives, or ask for another idea
+
+BUILD A SONG
+• Record extra layers: harmonies, instruments or beats, with a count-in
+• Loop recording keeps every pass so you can pick your best
+• Lock your melody to the beat and gently tune your voice
+• A metronome follows your tempo
+
+TAKE IT ANYWHERE
+• Export melody, chords and bass as a MIDI file for GarageBand, Logic or any DAW
+• Share a chord chart as text
+• Import audio files, or send Voice Memos straight to Alchemy from the Share menu
+
+PRIVATE BY DESIGN
+Everything happens on your iPhone. No account, no ads, no tracking. Your recordings never leave your device.
+
+Perfect for songwriters, singers, music students and anyone who has ever had a tune stuck in their head.
