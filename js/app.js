@@ -365,9 +365,14 @@ function onChunk(chunk, time) {
   const p = livePitch(r, rec.sr, liveGate());
   const t = rec.length / rec.sr;
   const midi = steadyPitch(p.midi, t);
-  rec.trace.push({ t, midi });
-  updateLive({ ...p, midi }, liveGate() / 2.5);
+  const floor = liveGate() / 2.5;
+  rec.trace.push({ t, midi, lvl: soundLevel(p.rms, floor) });
+  updateLive({ ...p, midi }, floor);
 }
+
+// Loudness from 0 to 1, in decibels above the room, so a quiet voice reads as
+// clearly as a loud one.
+const soundLevel = (rms, floor) => Math.max(0, Math.min(1, (20 * Math.log10(Math.max(rms, 1e-7) / floor) - 6) / 34));
 
 // Quiet input lets the odd stray reading through (noise, or a jump to the wrong
 // octave), which drew as a spike. A reading that starts a line, or leaps more than
@@ -385,8 +390,7 @@ function steadyPitch(midi, t) {
 }
 
 function updateLive(p, floor = 1e-4) {
-  // In decibels above the room, so a quiet voice moves the ring as visibly as a loud one.
-  const level = Math.max(0, Math.min(1, (20 * Math.log10(Math.max(p.rms, 1e-7) / floor) - 6) / 34));
+  const level = soundLevel(p.rms, floor);
   $('#recRing').style.setProperty('--lvl', (0.86 + level * 0.3).toFixed(3));
   const noteEl = $('#liveNote'), needle = $('#centsNeedle');
   if (p.midi != null) {
@@ -413,10 +417,14 @@ function resetLive() {
 function drawLive() {
   if (state.view !== 'capture') return;
   const cv = $('#liveCanvas');
-  const { g, w, h } = fitCanvas(cv);
+  const { g, w, h: full } = fitCanvas(cv);
   const trace = rec ? rec.trace : lastTrace;
   const now = trace.length ? trace[trace.length - 1].t : 0;
   const span = 6;
+  // A level strip runs along the bottom, so sounds with no note (beatbox, claps,
+  // taps) still show, as spikes. The pitch graph sits above it.
+  const strip = Math.round(Math.max(12, Math.min(22, full * 0.14)));
+  const h = full - strip - 2;
 
   const recent = trace.filter((p) => p.midi != null && p.t > now - 2.5).map((p) => p.midi).sort((a, b) => a - b);
   if (recent.length) liveCenter += (recent[recent.length >> 1] - liveCenter) * 0.2;
@@ -446,7 +454,7 @@ function drawLive() {
       const bx = w - 6 - ((now - k * rec.beat) / span) * (w - left - 6);
       const bar = k % rec.bar === 0;
       g.globalAlpha = bar ? 0.5 : 0.2;
-      g.fillRect(Math.round(bx), 0, bar ? 2 : 1, h);
+      g.fillRect(Math.round(bx), 0, bar ? 2 : 1, full);
     }
     g.globalAlpha = 1;
   }
@@ -465,6 +473,22 @@ function drawLive() {
     else { g.moveTo(x, y(p.midi)); pen = true; }
   }
   g.stroke();
+
+  // The level strip: each moment's loudness as a thin bar.
+  const base = full - 3;
+  g.fillStyle = token('--violet');
+  g.globalAlpha = 0.55;
+  const dx = (w - left - 6) / span;
+  for (let i = 0; i < trace.length; i++) {
+    const p = trace[i];
+    if (p.t < now - span || !p.lvl) continue;
+    const x = w - 6 - ((now - p.t) / span) * (w - left - 6);
+    const prev = trace[i - 1]?.t ?? p.t - 0.02;
+    const bw = Math.max(1, (p.t - prev) * dx);
+    const bh = Math.max(1, p.lvl * (strip - 4));
+    g.fillRect(x - bw, base - bh, bw, bh);
+  }
+  g.globalAlpha = 1;
 
   if (!trace.length) {
     g.fillStyle = token('--faint');
