@@ -846,16 +846,17 @@ async function processAudio(samples, sampleRate, name, tempo = null) {
 
   // A beat (beatbox, tapping) loads as a beat, with its tempo and chords in a key
   // across it; a tune can go on top as a layer and lead the chords from there.
-  // Stray "notes" in a beat (a kick's thump) aren't a tune to follow. Anything
-  // else with even one clear note is a tune, however short.
-  let hits = null;
-  if (notes.length === 0 || kind === 'rhythm') {
-    hits = hitsOf(raw, sampleRate);
-    if (hits.length >= 4) notes = [];
-    else if (!notes.length) {
-      toast("I couldn't hear a note. Try singing or playing a little louder.", 5000);
-      return;
-    } else hits = null;
+  // Anything with even one clear note is a tune, however short. A take can be
+  // both (a beat, then singing): it's a tune, and its beat is kept and drawn too.
+  const allHits = hitsOf(raw, sampleRate);
+  notes = dropThumps(notes, allHits);
+  // Something that sounds like a beat needs a real sung line to count as a tune.
+  if (kind === 'rhythm' && notes.filter((n) => n.end - n.start >= 0.25).length < 2) notes = [];
+  const beat = beatOf(allHits, notes);
+  const hits = beat.length >= 4 ? beat : null;
+  if (!notes.length && !hits) {
+    toast("I couldn't hear a note. Try singing or playing a little louder.", 5000);
+    return;
   }
 
   const duration = samples.length / sampleRate;
@@ -877,6 +878,17 @@ async function processAudio(samples, sampleRate, name, tempo = null) {
   haptic([8, 40, 8]);
   showView('harmony');
 }
+
+// In a take that mixes a beat and singing, a kick's low thump reads as a short
+// note, and a sung consonant ("ta") reads as a hit. Each is set aside: a thump
+// is short and low, and lands on a hit or sits over an octave below the tune.
+function dropThumps(notes, hits) {
+  const mids = notes.map((n) => n.midi).sort((a, b) => a - b);
+  const mid = mids[mids.length >> 1];
+  return notes.filter((n) => !(n.midi < 52 && n.end - n.start <= 0.25 &&
+    (hits.some((h) => h.d === 'k' && Math.abs(h.t - n.start) < 0.1) || n.midi < mid - 12)));
+}
+const beatOf = (hits, notes) => hits.filter((h) => !notes.some((n) => Math.abs(h.t - n.start) < 0.08));
 
 function loadTake(take, saved = {}) {
   stopPlayback();
@@ -1334,9 +1346,9 @@ function drawRoll(playT = null) {
   }
   g.globalAlpha = 1;
 
-  // Rhythm layers (and a beat-only take): a tick per hit along the bottom, tallest for kicks
+  // Rhythm layers (and the take's own beat): a tick per hit along the bottom, tallest for kicks
   const hitGroups = take.layers.filter((l) => kindOf(l) === 'rhythm' && l.hits);
-  if (beatSpan()) hitGroups.unshift({ hits: take.hits, offset: 0, muted: !take.mix.take.on, base: true });
+  if (take.hits?.length) hitGroups.unshift({ hits: take.hits, offset: 0, muted: !take.mix.take.on, base: true });
   for (const l of hitGroups) {
     g.fillStyle = l.muted ? cFaint : cViolet;
     for (const hit of l.hits) {
@@ -1598,12 +1610,13 @@ $('#trimApply').addEventListener('click', async () => {
   }
   const frames = take.track.frames.filter((f) => f.t >= start && f.t <= end);
   const r = segmentNotes({ frames, hop: take.track.hop });
-  if (!r.notes.length && !take.hits?.length) {
+  // A beat keeps no notes of its own (see processAudio).
+  const notes = take.notes.length ? dropThumps(r.notes, take.hits ?? []) : [];
+  if (!notes.length && !take.hits?.length) {
     toast('Not enough melody in that selection. Try a wider trim.');
     return;
   }
-  // A beat keeps no notes of its own (see processAudio).
-  take.notes = take.hits?.length ? [] : r.notes;
+  take.notes = notes;
   take.offset = r.offset;
   const snap = trimSnap();
   take.trim = snap === 'off' ? { start, end } : { start, end, snap };
@@ -2816,7 +2829,7 @@ async function applyTiming({ grid, amount, layers }) {
   restoreTiming();
   // The audio now follows this grid, so it stays put from here on.
   if (tempo.source !== 'countin') tempo.manual = true;
-  const clips = [{ obj: take, offset: 0, notes: take.notes, kind: take.hits?.length ? 'rhythm' : 'melody' }];
+  const clips = [{ obj: take, offset: 0, notes: take.notes, kind: take.notes.length ? 'melody' : 'rhythm' }];
   if (layers) {
     for (const l of take.layers) {
       clips.push({ obj: l, offset: l.offset, kind: kindOf(l), notes: l.notes.map((n) => ({ ...n, start: n.start - l.offset, end: n.end - l.offset })) });
@@ -2827,7 +2840,8 @@ async function applyTiming({ grid, amount, layers }) {
     setProcessing(true, 0.05 + (0.9 * k) / clips.length);
     await nextFrame();
     const o = c.obj, sr = o.sampleRate, duration = o.samples.length / sr;
-    const onsets = findOnsets(o.samples, sr, c.kind === 'rhythm' ? [] : c.notes, o.hits ? o.hits : undefined);
+    // A tune's onsets come from all its hits, sung consonants included.
+    const onsets = findOnsets(o.samples, sr, c.kind === 'rhythm' ? [] : c.notes, c.kind === 'rhythm' && o.hits ? o.hits : undefined);
     if (!onsets.length) continue;
     const div = grid === 'auto' ? chooseGrid(onsets.map((t) => t + c.offset), tempo) : grid;
     const { anchors, moved: n } = anchorsFor(onsets, tempo, div, amount, c.offset, duration);
