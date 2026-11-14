@@ -178,6 +178,27 @@ public class AlchemyPlugin: CAPPlugin, CAPBridgedPlugin {
     // MARK: Alchemy Pro
 
     static let proProduct = "com.mediavanity.alchemy.pro"
+    private static var cachedProduct: Product?
+
+    // The Pro product from the App Store. StoreKit can take minutes (or never
+    // answer) when it can't load products, say with no network or before the
+    // in-app purchase is set up, so this gives up after `timeout` seconds.
+    private static func proProductLookup(timeout: Double = 15) async -> Product? {
+        if let p = cachedProduct { return p }
+        let product: Product? = await withCheckedContinuation { cont in
+            let once = Once()
+            Task {
+                let p = try? await Product.products(for: [proProduct]).first
+                once.run { cont.resume(returning: p) }
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                once.run { cont.resume(returning: nil) }
+            }
+        }
+        if let p = product { cachedProduct = p }
+        return product
+    }
 
     private static func ownsPro() async -> Bool {
         for await result in Transaction.currentEntitlements {
@@ -196,7 +217,7 @@ public class AlchemyPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func proStatus(_ call: CAPPluginCall) {
         Task {
             var out: [String: Any] = ["pro": await AlchemyPlugin.ownsPro()]
-            if let product = try? await Product.products(for: [AlchemyPlugin.proProduct]).first {
+            if let product = await AlchemyPlugin.proProductLookup() {
                 out["price"] = product.displayPrice
             }
             call.resolve(out)
@@ -207,7 +228,7 @@ public class AlchemyPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func buyPro(_ call: CAPPluginCall) {
         Task {
             do {
-                guard let product = try await Product.products(for: [AlchemyPlugin.proProduct]).first else {
+                guard let product = await AlchemyPlugin.proProductLookup() else {
                     call.resolve(["pro": false, "error": "unavailable"])
                     return
                 }
@@ -340,5 +361,18 @@ public class AlchemyPlugin: CAPPlugin, CAPBridgedPlugin {
         wav.append(contentsOf: Array("data".utf8)); put32(UInt32(n * 2))
         samples.withUnsafeBytes { wav.append(contentsOf: $0) }
         return (wav, file.length > limit)
+    }
+}
+
+// Runs its closure the first time only (for a continuation two tasks race to resume).
+final class Once {
+    private let lock = NSLock()
+    private var done = false
+    func run(_ body: () -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        if done { return }
+        done = true
+        body()
     }
 }
