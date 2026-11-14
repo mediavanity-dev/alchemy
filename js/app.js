@@ -912,9 +912,12 @@ function loadTake(take, saved = {}) {
   state.palette = { simple: 'triads', rich: 'chromatic' }[saved.palette] ?? saved.palette ?? state.palette;
   if (locked('palette', state.palette)) state.palette = 'triads';
   reharmonize(saved.idea > 0 ? saved.idea : 0);
-  state.overrides = saved.overrides ?? {};
+  // Without Pro, chords picked from the Pro chord sets (extended, chromatic) give
+  // way to the suggestions.
+  const usable = (id) => state.pro || (state.harmony.vocab[id]?.tier ?? 0) === 0;
+  state.overrides = Object.fromEntries(Object.entries(saved.overrides ?? {}).filter(([, id]) => usable(id)));
   // Chord timing the user edited by hand
-  if (saved.segments?.length) {
+  if (saved.segments?.length && saved.segments.every((s) => usable(s.chordId))) {
     const { vocab } = state.harmony;
     state.harmony.segments = saved.segments.map((s) => ({ start: s.start, end: s.end, chord: vocab[s.chordId] ?? vocab[0], edited: s.edited }));
     state.harmony.segments.forEach(refitSegment);
@@ -1502,15 +1505,9 @@ document.querySelectorAll('.seg[data-setting]').forEach((seg) =>
     if (state[setting] === b.dataset.value) return;
     if (locked(setting, b.dataset.value)) { openProSheet(setting); return; }
     state[setting] = b.dataset.value;
-    if (setting === 'mode') {
-      const wasPlaying = !!state.playing;
-      renderHarmony();
-      if (wasPlaying) startPlayback();
-    } else {
-      stopPlayback();
-      reharmonize(state.ideaIdx);
-      renderHarmony();
-    }
+    stopPlayback();
+    reharmonize(state.ideaIdx);
+    renderHarmony();
     haptic();
   })
 );
@@ -1851,7 +1848,7 @@ function afterNoteEdit() {
     toast('Note changed. Your chords are kept; tap one to see fresh suggestions.');
   } else {
     reharmonize();
-    toast(state.take.tune.amount ? 'Note changed and chords re-fitted.' : 'Note changed and chords re-fitted. Turn on Tune to hear your voice at the new pitch.', 4200);
+    toast(state.take.tune.amount || !state.pro ? 'Note changed and chords re-fitted.' : 'Note changed and chords re-fitted. Turn on Tune to hear your voice at the new pitch.', 4200);
   }
 }
 
@@ -2094,7 +2091,7 @@ const chordStyle = () => {
 // The iPhone app is free, with extras in Alchemy Pro, a one-time purchase. The
 // free app does the whole job (record, key, a progression in triads with "Chord
 // every", playback, trim, loop, a layer, an unlimited library); Pro adds more
-// progressions, chord sets (extended, chromatic), sounds, styles, more layers,
+// progressions, chord sets (extended, chromatic), sounds, styles, up to six layers,
 // lock-to-beat and tune, and MIDI export. The web version has it all.
 const FREE_SOUNDS = ['pad', 'epiano'];
 const FREE_STYLES = ['held', 'beats'];
@@ -2136,7 +2133,7 @@ const PRO_REASONS = {
   style: 'That playing style comes with Alchemy Pro.',
   palette: 'Chord sets come with Alchemy Pro.',
   idea: 'More progressions come with Alchemy Pro.',
-  layers: 'The free app keeps one layer. Alchemy Pro adds as many as you like.',
+  layers: `The free app keeps one layer. Alchemy Pro gives you up to ${MAX_LAYERS}.`,
   timing: 'Lock to beat comes with Alchemy Pro.',
   tune: 'Tune comes with Alchemy Pro.',
   midi: 'MIDI export comes with Alchemy Pro.',
@@ -2152,7 +2149,7 @@ function openProSheet(reason = null) {
       <li><b>Three more playing styles:</b> strum, arpeggio, and bass &amp; chord</li>
       <li><b>More progressions:</b> switch between several that fit, in each key</li>
       <li><b>Chord sets:</b> extended chords (7ths, sus, add9) and chromatic, with borrowed chords</li>
-      <li><b>Unlimited layers,</b> with every pass of a loop recording kept</li>
+      <li><b>Up to ${MAX_LAYERS} layers,</b> with every pass of a loop recording kept</li>
       <li><b>Lock to beat and Tune</b> for your melody</li>
       <li><b>MIDI export</b> of melody, chords and bass to GarageBand, Logic or any DAW</li>
     </ul>
@@ -2587,7 +2584,7 @@ function openTracksSheet() {
     <h3>Tracks</h3>
     <p class="sub">Record more parts over your take: sing, play an instrument, or tap out a beat. Alchemy works out which it is; tap the label to change it. Headphones keep the playback out of the mic.</p>
     <div class="track-list">
-      ${row('take', 'take', 'Your take', `Melody · ${fmtTime(take.duration)}`)}
+      ${row('take', 'take', 'Your take', `${!take.notes.length ? 'Beat' : take.hits?.length ? 'Melody and beat' : 'Melody'} · ${fmtTime(take.duration)}`)}
       ${take.layers.map(layerRow).join('')}
       <div class="track-group">Backing</div>
       ${row('backing', 'backing', 'Chords', backingLabel(), `
@@ -2715,7 +2712,7 @@ function voiceClip(clip) {
   const { amount, mode } = take.tune;
   const isBase = clip === take;
   const tuning = isBase ? take.traceOffset ?? take.offset : clip.traceOffset;
-  if (!amount || !clip.trace || tuning == null || (!isBase && kindOf(clip) !== 'melody')) return clip;
+  if (!state.pro || !amount || !clip.trace || tuning == null || (!isBase && kindOf(clip) !== 'melody')) return clip;
 
   const key = state.keys[state.keyIdx];
   const notes = isBase ? take.notes : clip.notes.map((n) => ({ ...n, start: n.start - clip.offset, end: n.end - clip.offset }));
